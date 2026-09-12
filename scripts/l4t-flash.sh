@@ -18,6 +18,26 @@ TREE="${L4T_DIR}/Linux_for_Tegra"
 BOARD=${L4T_BOARD:-jetson-nano-devkit}
 TARGET=${L4T_TARGET:-mmcblk0p1}
 
+# Carrier revision override.
+#
+# flash.sh derives the carrier device tree from FAB:
+#   process_board_version() in p3448-0000.conf.common
+#   FAB < "300" -> tegra210-p3448-0000-p3449-0000-a02.dtb
+#   FAB >= "300" -> ...-b00.dtb
+#
+# It normally reads FAB from the module EEPROM, but this unit's EEPROM read
+# fails ("eeprom_init: EEPROM read failed" in every boot log, before and after
+# reflashing), so detection falls through to the a02 default. This carrier is a
+# B01, whose display wiring differs -- which is why a perfectly healthy board
+# booted all the way to the setup wizard with the screen dark.
+#
+# Setting these explicitly skips the EEPROM path entirely: flash.sh only calls
+# get_board_version() when FAB is empty.
+BOARDID=${L4T_BOARDID:-3448}
+FAB=${L4T_FAB:-300}
+BOARDSKU=${L4T_BOARDSKU:-0000}
+export BOARDID FAB BOARDSKU
+
 [[ ${EUID} -eq 0 ]] || { echo "error: run me with sudo" >&2; exit 1; }
 [[ -x ${TREE}/flash.sh ]] || {
   echo "error: no flash.sh at ${TREE}. run scripts/l4t-prepare.sh first" >&2
@@ -44,6 +64,8 @@ if [[ ${pid} != "7f21" ]]; then
 fi
 
 echo "flashing ${BOARD} -> ${TARGET}"
+echo "  BOARDID=${BOARDID} FAB=${FAB} BOARDSKU=${BOARDSKU}"
+echo "  FAB ${FAB} selects the $([ "${FAB}" \< "300" ] && echo a02 || echo b00) carrier device tree"
 echo "this erases the microSD card entirely."
 cd "${TREE}"
 ./flash.sh "${BOARD}" "${TARGET}"

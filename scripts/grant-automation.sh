@@ -49,6 +49,9 @@ install_pinned() {
       -e 's|^REL=.*|REL=R32.7.6|' \
       -e 's|^BOARD=.*|BOARD=jetson-nano-devkit|' \
       -e 's|^TARGET=.*|TARGET=mmcblk0p1|' \
+      -e 's|^BOARDID=.*|BOARDID=3448|' \
+      -e 's|^FAB=.*|FAB=300|' \
+      -e 's|^BOARDSKU=.*|BOARDSKU=0000|' \
       "${src}" > "${dst}.tmp"
   bash -n "${dst}.tmp" || { echo "error: ${dst} failed syntax check" >&2; exit 1; }
   install -o root -g root -m 0755 "${dst}.tmp" "${dst}"

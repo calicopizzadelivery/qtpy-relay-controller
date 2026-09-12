@@ -40,6 +40,38 @@ Channel order also does not follow physical port order — channel 1 lands on hu
 port 2, channel 4 on hub port 1, and the two hub tiers interleave. Generate the
 map, do not assume it.
 
+## Current occupants (2026-09-12)
+
+The flash drives above were mapping loads and have been removed. What is on the
+switched hub now:
+
+| Path | Channel | Device |
+|---|---|---|
+| `1-8.2.1` | 1 | CP2102N USB-UART — the Jetson's serial console, `/dev/ttyUSB0` |
+| `1-8.2.3` | 3 | the **recovery** QT Py controller |
+| `1-8.2.4.4` | 5 | USB Video — HDMI capture |
+
+> **The recovery controller is on a switched port.** `OFF 3` cuts power to the
+> board that holds FORCE_RECOVERY, and `OFF ALL` includes it. The `relay8`
+> controller itself is safely on the root hub at `1-1`, but this one is not.
+> Move it upstream of the relays, or keep channel 3 out of any sweep.
+
+Note that channel 1 now switches the console adapter: cutting it mid-flash
+would drop the UART, and channel 5 drops the HDMI capture.
+
+## Channel 6 is the one channel never confirmed by observable effect
+
+Every other channel was proven by watching a specific USB device disappear.
+Channel 6 switches no USB device, so it has only ever been identified
+indirectly: by elimination, and by its relay indicator lighting when firmware
+channel 6 is driven. That is good evidence the relay module's input is being
+driven, but it is not proof that the contacts move or that the rail behind them
+reaches the module.
+
+If a Jetson on that rail shows no sign of life, confirm the rail directly —
+meter across the module's power input while toggling channel 6 — before
+concluding the module is at fault.
+
 ## Regenerating
 
 ```bash

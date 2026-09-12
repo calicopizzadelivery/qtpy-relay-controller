@@ -80,8 +80,18 @@ flash_serial() {
     echo "error: no read/write on ${port}. run: sudo ./scripts/host-setup.sh" >&2
     exit 1
   fi
+  [[ -f ${REPO_ROOT}/build/relay-controller.ino.bin ]] || {
+    echo "error: build/ is empty, run ./scripts/build.sh" >&2; exit 1; }
+  # bossac takes the device name and does not follow symlinks, so hand it the
+  # real tty rather than our /dev/qtpy-relay alias. The board also re-enumerates
+  # under its bootloader PID during the 1200-baud touch, which is why the alias
+  # disappears mid-upload.
+  port=$(readlink -f "${port}")
   echo "uploading to ${port}"
-  arduino-cli upload --fqbn "${FQBN}" --port "${port}" "${SKETCH}"
+  # --input-dir pins the upload to the artifact build.sh produced, rather than
+  # whatever happens to be in arduino-cli's build cache.
+  arduino-cli upload --fqbn "${FQBN}" --port "${port}" \
+    --input-dir "${REPO_ROOT}/build" "${SKETCH}"
 }
 
 case "${METHOD}" in

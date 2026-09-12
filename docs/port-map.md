@@ -59,18 +59,17 @@ switched hub now:
 Note that channel 1 now switches the console adapter: cutting it mid-flash
 would drop the UART, and channel 5 drops the HDMI capture.
 
-## Channel 6 is the one channel never confirmed by observable effect
+## Channel 6, confirmed
 
-Every other channel was proven by watching a specific USB device disappear.
-Channel 6 switches no USB device, so it has only ever been identified
-indirectly: by elimination, and by its relay indicator lighting when firmware
-channel 6 is driven. That is good evidence the relay module's input is being
-driven, but it is not proof that the contacts move or that the rail behind them
-reaches the module.
+Channel 6 switches no USB device, so unlike every other channel it could not be
+proven by watching something leave the bus. It was confirmed directly instead,
+on 2026-09-12: toggling it on a fixed cadence with `tools/blink-channel.py`
+visibly cuts the Jetson carrier's power LED and RGB fan. The relay, its wiring
+and the rail are all good.
 
-If a Jetson on that rail shows no sign of life, confirm the rail directly —
-meter across the module's power input while toggling channel 6 — before
-concluding the module is at fault.
+Worth being precise about what that does and does not show. The LED and fan run
+from the carrier board's own 5 V rail, so they prove the **carrier** is powered.
+They say nothing about whether the **module** boots.
 
 ## Regenerating
 

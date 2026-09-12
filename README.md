@@ -290,6 +290,8 @@ scripts/flash.sh             UF2 drag-drop or serial upload, --profile required
 scripts/host-setup.sh        one-time root: udev rule, dialout, stable symlink
 tools/relayctl.py            host CLI
 tools/map-ports.py           map channels to USB hub ports empirically
+tools/enter-recovery.py      two-board FORCE_RECOVERY + power-cycle sequence
+tools/blink-channel.py       toggle one channel on a cadence you can meter
 tools/bin2uf2.py             raw .bin -> UF2 container
 test/test_relay.cpp          relay8 profile tests
 test/test_recovery.cpp       recovery profile tests

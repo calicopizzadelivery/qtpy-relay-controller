@@ -111,6 +111,36 @@ Channel 8 sits on the `Serial1` RX pin. The sketch never calls `Serial1.begin()`
 so the pin stays a plain GPIO — but do not add a hardware UART to this sketch
 without remapping that channel first.
 
+## Deployment: the Jetson bring-up rig
+
+On the bench this drives a USB hub whose per-port power is relay-switched:
+
+| Channel | Switches |
+|---|---|
+| 1–7 | Power to one USB device on the hub |
+| 8 | Power to the Jetson module, for a hard power cycle of the carrier board |
+
+So a hard power cycle of the Jetson is one command:
+
+```
+PULSE 8 OFF 5000
+```
+
+Five seconds dark, then power restored — and because pulses do not block, the
+console stays responsive the whole time and the revert happens even if the host
+has wandered off.
+
+### Do not let the board switch its own supply
+
+If the QT Py is plugged into one of the switched hub ports, turning that channel
+off cuts the board's own power. It drops off the bus mid-command, and only a
+physical re-plug brings it back. `OFF ALL` does this unconditionally, and so
+does any script that sweeps every channel.
+
+**Plug the QT Py into an unswitched port, upstream of the relays.** The
+firmware cannot defend against this on its own: it has no way to know which
+port it is powered from.
+
 ## Build and flash
 
 ```bash

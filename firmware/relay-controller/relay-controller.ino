@@ -15,21 +15,31 @@
  *   7   SCK    8
  *   8   RX     7
  *
+ * That map is the relay8 profile. The recovery profile has a single channel
+ * on TX (pin 6) instead -- see the profile block below.
+ *
  * Relay polarity
  * --------------
- * The relay modules are normally closed: driving a channel HIGH energises the
- * coil, opens the contacts and cuts power to the attached device. This firmware
- * speaks in terms of the *load*, not the coil:
+ * The two boards are wired the opposite way round, so the firmware keeps the
+ * inversion in one place and speaks in terms of the *effect*, never the
+ * voltage. ON always means the thing the board exists to do is happening.
  *
- *   ON  -> pin LOW  -> contacts closed -> device powered
- *   OFF -> pin HIGH -> contacts open   -> device unpowered
+ *   relay8    normally closed. Driving a channel HIGH energises the coil and
+ *             opens the contacts, cutting power. So ON is pin LOW (contacts
+ *             closed, device powered), and every channel boots ON: a reset
+ *             must never silently drop power.
  *
- * All channels come up ON, so a reset or reflash never silently drops power.
+ *   recovery  normally open. Driving the channel HIGH energises the coil and
+ *             closes the contacts, grounding the Jetson's FORCE_RECOVERY pin.
+ *             So ON is pin HIGH (recovery asserted), and it boots OFF: a reset
+ *             must never silently drop the Jetson into recovery mode.
+ *
  * Note that the pins float for a few hundred ms during bootloader startup,
  * before setup() runs; the relay board's own input bias decides the state
  * during that window.
  *
- * Pin 7 is the Serial1 RX pin. Serial1.begin() is never called, so the pin
+ * Pins 6 and 7 are the Serial1 TX and RX pins. Serial1.begin() is never
+ * called on either profile, so they stay plain GPIO. The pin
  * stays a plain GPIO. Do not add Serial1 to this sketch without remapping
  * channel 8.
  *
@@ -50,40 +60,59 @@
 #endif
 
 #define FW_NAME     "qtpy-relay-controller"
-#define FW_VERSION  "1.2.0"
+#define FW_VERSION  "1.3.0"
 
-/* Onboard RGB heartbeat: alternates green and blue on a fixed period, so a
-   glance at the board tells you the firmware is running and its loop is not
-   wedged. Purely a liveness indicator -- it says nothing about relay state. */
+/*
+ * Board profiles. Pick one at build time: scripts/build.sh --profile NAME.
+ * They differ in channel count, which pin is wired, which pin level means
+ * "on", and which state is safe to boot into. See the polarity note above.
+ */
+#define BOARD_RELAY8    1
+#define BOARD_RECOVERY  2
+
+#ifndef BOARD_PROFILE
+#define BOARD_PROFILE BOARD_RELAY8
+#endif
+
+#if BOARD_PROFILE == BOARD_RELAY8
+  #define PROFILE_NAME  "relay8"
+  #define NUM_CHANNELS  8
+  #define ON_LEVEL      LOW
+  #define OFF_LEVEL     HIGH
+  #define BOOT_ON       true
+  #define LED_PHASE_A   0, 255, 0        /* green */
+  #define LED_PHASE_B   0, 0, 255        /* blue  */
+#elif BOARD_PROFILE == BOARD_RECOVERY
+  #define PROFILE_NAME  "recovery"
+  #define NUM_CHANNELS  1
+  #define ON_LEVEL      HIGH
+  #define OFF_LEVEL     LOW
+  #define BOOT_ON       false
+  #define LED_PHASE_A   0, 255, 0        /* green */
+  #define LED_PHASE_B   255, 255, 255    /* white */
+#else
+  #error "BOARD_PROFILE must be BOARD_RELAY8 or BOARD_RECOVERY"
+#endif
+
+/* Onboard RGB heartbeat: alternates two colours on a fixed period, so a glance
+   at the board says the firmware is running, its loop is not wedged, and which
+   profile it carries. Liveness only -- it says nothing about relay state. */
 #define LED_PERIOD_MS   1000
 #define LED_BRIGHTNESS  32      /* of 255; the onboard pixel is very bright */
 
-/*
- * Channel count. A board with fewer relays wired builds the same source with
- * a smaller count; channels are taken from the front of RELAY_PIN, so a
- * one-channel build drives A0 alone. Build a variant with:
- *
- *   arduino-cli compile --build-property compiler.cpp.extra_flags=-DRELAY_CHANNELS=1
- *
- * (compiler.cpp.extra_flags is additive; build.extra_flags would clobber the
- * board's own -D flags.)
- */
-#ifndef RELAY_CHANNELS
-#define RELAY_CHANNELS 8
-#endif
-
-static const uint8_t NUM_RELAYS = RELAY_CHANNELS;
+static const uint8_t NUM_RELAYS = NUM_CHANNELS;
 
 /* Longest command line accepted, including the terminator. */
 #define LINE_BUF 64
 
-/* Boot state for every channel: true = powered. */
-static const bool BOOT_POWERED = true;
+/* Boot state for every channel, from the profile above. */
+static const bool BOOT_STATE = BOOT_ON;
 
 /* Longest accepted pulse, in milliseconds. */
 static const uint32_t MAX_PULSE_MS = 3600000UL;
 
-static const uint8_t RELAY_PIN[8] = {
+#if BOARD_PROFILE == BOARD_RELAY8
+static const uint8_t RELAY_PIN[NUM_CHANNELS] = {
   PIN_A0,          /* ch1  A0   */
   PIN_A1,          /* ch2  A1   */
   PIN_A2,          /* ch3  A2   */
@@ -93,15 +122,18 @@ static const uint8_t RELAY_PIN[8] = {
   PIN_SPI_SCK,     /* ch7  SCK  */
   PIN_SERIAL1_RX   /* ch8  RX   */
 };
-
-static const char* const RELAY_PAD[8] = {
+static const char* const RELAY_PAD[NUM_CHANNELS] = {
   "A0", "A1", "A2", "A3", "MOSI", "MISO", "SCK", "RX"
 };
+#else
+static const uint8_t RELAY_PIN[NUM_CHANNELS] = { PIN_SERIAL1_TX };
+static const char* const RELAY_PAD[NUM_CHANNELS] = { "TX" };
+#endif
 
-static_assert(RELAY_CHANNELS >= 1 && RELAY_CHANNELS <= 8,
-              "RELAY_CHANNELS must be between 1 and 8");
+static_assert(NUM_CHANNELS >= 1 && NUM_CHANNELS <= 8,
+              "NUM_CHANNELS must be between 1 and 8");
 
-static bool     relayPowered[NUM_RELAYS];
+static bool     relayOn[NUM_RELAYS];
 static bool     pulseActive[NUM_RELAYS];
 static uint32_t pulseDeadline[NUM_RELAYS];   /* millis() value to revert at */
 static bool     pulseRestore[NUM_RELAYS];    /* state to revert to */
@@ -273,7 +305,7 @@ static void printInfo(void)
 {
   Serial.print("OK INFO id=");
   Serial.print(deviceId);
-  Serial.print(" fw=" FW_NAME " ver=" FW_VERSION " channels=");
+  Serial.print(" fw=" FW_NAME " ver=" FW_VERSION " profile=" PROFILE_NAME " channels=");
   Serial.print((unsigned int)NUM_RELAYS);
   Serial.print(" serial=");
   printChipSerial();
@@ -285,9 +317,12 @@ static void printInfo(void)
 /* ------------------------------------------------------------------ */
 
 #if defined(RELAY_HOST_TEST)
-extern int hostLedGreen;                     /* 1 green, 0 blue, -1 unset */
+extern int hostLedR, hostLedG, hostLedB;
 static void ledBegin(void) { }
-static void ledSet(bool green) { hostLedGreen = green ? 1 : 0; }
+static void ledSet(uint8_t r, uint8_t g, uint8_t b)
+{
+  hostLedR = r; hostLedG = g; hostLedB = b;
+}
 #else
 static Adafruit_NeoPixel pixel(1, PIN_NEOPIXEL, NEO_GRB + NEO_KHZ800);
 
@@ -298,17 +333,23 @@ static void ledBegin(void)
   pixel.show();
 }
 
-static void ledSet(bool green)
+static void ledSet(uint8_t r, uint8_t g, uint8_t b)
 {
   /* show() bit-bangs with interrupts off, but only for about 30 us for a
      single pixel, which USB does not notice. */
-  pixel.setPixelColor(0, green ? pixel.Color(0, 255, 0) : pixel.Color(0, 0, 255));
+  pixel.setPixelColor(0, pixel.Color(r, g, b));
   pixel.show();
 }
 #endif
 
 static uint32_t ledLast;
-static bool     ledGreen;
+static bool     ledPhaseA;
+
+static void ledApply(void)
+{
+  if (ledPhaseA) ledSet(LED_PHASE_A);
+  else           ledSet(LED_PHASE_B);
+}
 
 /* Unsigned subtraction wraps correctly, so this survives the millis() rollover
    the same way the pulse deadlines do. */
@@ -316,9 +357,9 @@ static void serviceHeartbeat(void)
 {
   uint32_t now = millis();
   if ((uint32_t)(now - ledLast) >= (uint32_t)LED_PERIOD_MS) {
-    ledLast = now;
-    ledGreen = !ledGreen;
-    ledSet(ledGreen);
+    ledLast   = now;
+    ledPhaseA = !ledPhaseA;
+    ledApply();
   }
 }
 
@@ -326,27 +367,29 @@ static void serviceHeartbeat(void)
 /* Relay primitives                                                    */
 /* ------------------------------------------------------------------ */
 
-static inline void driveChannel(uint8_t idx, bool powered)
+static inline void driveChannel(uint8_t idx, bool on)
 {
-  digitalWrite(RELAY_PIN[idx], powered ? LOW : HIGH);
-  relayPowered[idx] = powered;
+  /* ON_LEVEL/OFF_LEVEL carry the profile's relay polarity, so everything above
+     this line reasons about the effect rather than the voltage. */
+  digitalWrite(RELAY_PIN[idx], on ? ON_LEVEL : OFF_LEVEL);
+  relayOn[idx] = on;
 }
 
 /* Set a channel and cancel any pulse in flight on it. */
-static void setChannel(uint8_t idx, bool powered)
+static void setChannel(uint8_t idx, bool on)
 {
   pulseActive[idx] = false;
-  driveChannel(idx, powered);
+  driveChannel(idx, on);
 }
 
-static void pulseChannel(uint8_t idx, bool powered, uint32_t ms)
+static void pulseChannel(uint8_t idx, bool on, uint32_t ms)
 {
   /* Revert to whatever the channel was doing before this pulse. If a pulse
      was already running, that is its pending restore state, not the live
      pin state. */
-  bool restore = pulseActive[idx] ? pulseRestore[idx] : relayPowered[idx];
+  bool restore = pulseActive[idx] ? pulseRestore[idx] : relayOn[idx];
 
-  driveChannel(idx, powered);
+  driveChannel(idx, on);
   pulseRestore[idx]  = restore;
   pulseDeadline[idx] = millis() + ms;
   pulseActive[idx]   = true;
@@ -376,7 +419,7 @@ static void printState(void)
     Serial.print(' ');
     Serial.print(i + 1);
     Serial.print('=');
-    Serial.print(relayPowered[i] ? "ON" : "OFF");
+    Serial.print(relayOn[i] ? "ON" : "OFF");
     if (pulseActive[i]) {
       /* Remaining time, clamped at 0 in case we race the deadline. */
       int32_t remain = (int32_t)(pulseDeadline[i] - millis());
@@ -392,8 +435,13 @@ static void printState(void)
 static void printHelp(void)
 {
   Serial.println("commands (case-insensitive, one per line):");
+#if BOARD_PROFILE == BOARD_RELAY8
   Serial.println("  ON <n>            power channel n on   (pin LOW, relay closed)");
   Serial.println("  OFF <n>           power channel n off  (pin HIGH, relay open)");
+#else
+  Serial.println("  ON <n>            assert FORCE_RECOVERY  (pin HIGH, relay closed)");
+  Serial.println("  OFF <n>           release FORCE_RECOVERY (pin LOW, relay open)");
+#endif
   Serial.println("  ON ALL | OFF ALL  all channels at once");
   Serial.println("  ALL ON | ALL OFF  same thing, other word order");
   Serial.println("  RELAY <n> ON|OFF|TOGGLE");
@@ -462,12 +510,12 @@ static bool parseMillis(const char* s, uint32_t* out)
   return true;
 }
 
-static void applyToTarget(int target, bool powered)
+static void applyToTarget(int target, bool on)
 {
   if (target == 0) {
-    for (uint8_t i = 0; i < NUM_RELAYS; i++) setChannel(i, powered);
+    for (uint8_t i = 0; i < NUM_RELAYS; i++) setChannel(i, on);
   } else {
-    setChannel((uint8_t)(target - 1), powered);
+    setChannel((uint8_t)(target - 1), on);
   }
 }
 
@@ -579,7 +627,7 @@ static void handleLine(char* line)
     Serial.print("OK GET ");
     Serial.print(target);
     Serial.print(' ');
-    Serial.println(relayPowered[i] ? "ON" : "OFF");
+    Serial.println(relayOn[i] ? "ON" : "OFF");
     return;
   }
 
@@ -598,7 +646,7 @@ static void handleLine(char* line)
   if (strcmp(cmd, "ALL") == 0) {
     if (n < 2) { Serial.println("ERR ALL NEEDS ON OR OFF"); return; }
     if (strcmp(tok[1], "TOGGLE") == 0) {
-      for (uint8_t i = 0; i < NUM_RELAYS; i++) setChannel(i, !relayPowered[i]);
+      for (uint8_t i = 0; i < NUM_RELAYS; i++) setChannel(i, !relayOn[i]);
       Serial.println("OK TOGGLE ALL");
       return;
     }
@@ -615,8 +663,8 @@ static void handleLine(char* line)
     int target = parseTarget(tok[1]);
     if (target < 0) { Serial.print("ERR BAD CHANNEL "); Serial.println(tok[1]); return; }
     if (strcmp(tok[2], "TOGGLE") == 0) {
-      if (target == 0) for (uint8_t i = 0; i < NUM_RELAYS; i++) setChannel(i, !relayPowered[i]);
-      else setChannel((uint8_t)(target - 1), !relayPowered[target - 1]);
+      if (target == 0) for (uint8_t i = 0; i < NUM_RELAYS; i++) setChannel(i, !relayOn[i]);
+      else setChannel((uint8_t)(target - 1), !relayOn[target - 1]);
       ackTarget("TOGGLE", target, NULL);
       return;
     }
@@ -632,8 +680,8 @@ static void handleLine(char* line)
     if (n < 2) { Serial.println("ERR TOGGLE NEEDS A CHANNEL OR ALL"); return; }
     int target = parseTarget(tok[1]);
     if (target < 0) { Serial.print("ERR BAD CHANNEL "); Serial.println(tok[1]); return; }
-    if (target == 0) for (uint8_t i = 0; i < NUM_RELAYS; i++) setChannel(i, !relayPowered[i]);
-    else setChannel((uint8_t)(target - 1), !relayPowered[target - 1]);
+    if (target == 0) for (uint8_t i = 0; i < NUM_RELAYS; i++) setChannel(i, !relayOn[i]);
+    else setChannel((uint8_t)(target - 1), !relayOn[target - 1]);
     ackTarget("TOGGLE", target, NULL);
     return;
   }
@@ -658,10 +706,10 @@ static void handleLine(char* line)
     char msbuf[16];
     if (target == 0) {
       for (uint8_t i = 0; i < NUM_RELAYS; i++)
-        pulseChannel(i, want < 0 ? !relayPowered[i] : (want == 1), ms);
+        pulseChannel(i, want < 0 ? !relayOn[i] : (want == 1), ms);
     } else {
       uint8_t i = (uint8_t)(target - 1);
-      pulseChannel(i, want < 0 ? !relayPowered[i] : (want == 1), ms);
+      pulseChannel(i, want < 0 ? !relayOn[i] : (want == 1), ms);
     }
 
     /* Echo the state we pulsed to, so a bare PULSE is unambiguous. Per-channel
@@ -669,7 +717,7 @@ static void handleLine(char* line)
     Serial.print("OK PULSE ");
     if (target == 0) Serial.print("ALL"); else Serial.print(target);
     Serial.print(' ');
-    if (want < 0) Serial.print(target == 0 ? "INVERT" : (relayPowered[target - 1] ? "ON" : "OFF"));
+    if (want < 0) Serial.print(target == 0 ? "INVERT" : (relayOn[target - 1] ? "ON" : "OFF"));
     else Serial.print(want == 1 ? "ON" : "OFF");
     Serial.print(' ');
     snprintf(msbuf, sizeof(msbuf), "%lu", (unsigned long)ms);
@@ -690,18 +738,18 @@ void setup(void)
   for (uint8_t i = 0; i < NUM_RELAYS; i++) {
     /* Load the output register before enabling the driver, so the pin never
        glitches to the opposite state as it becomes an output. */
-    digitalWrite(RELAY_PIN[i], BOOT_POWERED ? LOW : HIGH);
+    digitalWrite(RELAY_PIN[i], BOOT_STATE ? ON_LEVEL : OFF_LEVEL);
     pinMode(RELAY_PIN[i], OUTPUT);
-    driveChannel(i, BOOT_POWERED);
+    driveChannel(i, BOOT_STATE);
     pulseActive[i] = false;
   }
 
   idLoad();
 
   ledBegin();
-  ledGreen = true;
-  ledLast  = millis();
-  ledSet(ledGreen);
+  ledPhaseA = true;
+  ledLast   = millis();
+  ledApply();
 
   /* Baud is ignored on USB CDC. Never block on !Serial: this board has to run
      headless. */

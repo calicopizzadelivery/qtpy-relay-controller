@@ -20,7 +20,7 @@ ShimSerial  Serial;
    erased, exactly as a never-written row reads. */
 uint8_t hostFlashPage[FLASH_PAGE_SIZE];
 int     hostFlashWrites;
-int     hostLedGreen = -1;
+int     hostLedR = -1, hostLedG = -1, hostLedB = -1;
 
 #include "../firmware/relay-controller/relay-controller.ino"
 
@@ -73,6 +73,11 @@ static void advance(uint32_t ms)
   serviceHeartbeat();
 }
 
+static bool ledIs(int r, int g, int b)
+{
+  return hostLedR == r && hostLedG == g && hostLedB == b;
+}
+
 static void section(const char* name) { std::cout << name << "\n"; }
 
 int main(void)
@@ -99,7 +104,7 @@ int main(void)
           firstWrite < firstMode,
           "output register is loaded before the driver is enabled");
 
-    check(hostLedGreen == 1, "the pixel comes up green");
+    check(ledIs(0, 255, 0), "the pixel comes up green");
   }
 
   section("channel map");
@@ -256,23 +261,23 @@ int main(void)
   {
     /* Earlier sections advanced the clock, so the heartbeat phase is arbitrary
        by now. Re-align it before measuring the period. */
-    ledLast      = shimMillis;
-    ledGreen     = true;
-    hostLedGreen = 1;
+    ledLast   = shimMillis;
+    ledPhaseA = true;
+    ledApply();
 
     advance(999);
-    check(hostLedGreen == 1, "holds just short of the period");
+    check(ledIs(0, 255, 0), "holds green just short of the period");
     advance(1);
-    check(hostLedGreen == 0, "flips to blue on the period");
+    check(ledIs(0, 0, 255), "flips to blue on the period");
     advance(1000);
-    check(hostLedGreen == 1, "and back to green");
+    check(ledIs(0, 255, 0), "and back to green");
 
     /* Same rollover exposure as the pulse deadlines. */
     shimMillis = 0xFFFFFF00UL;
     ledLast    = shimMillis;
-    int before = hostLedGreen;
+    int before = hostLedB;
     advance(1000);
-    check(hostLedGreen != before, "keeps flipping across the millis wrap");
+    check(hostLedB != before, "keeps flipping across the millis wrap");
   }
 
   section("identity: defaults and round-trip");
@@ -340,10 +345,10 @@ int main(void)
   section("identity: INFO");
   {
     checkEq(cmd("INFO"),
-            "OK INFO id=relay8 fw=qtpy-relay-controller ver=1.2.0 "
-            "channels=8 serial=HOSTTEST",
+            "OK INFO id=relay8 fw=qtpy-relay-controller ver=1.3.0 "
+            "profile=relay8 channels=8 serial=HOSTTEST",
             "INFO reports identity, firmware, channels and chip serial");
-    checkEq(cmd("VERSION"), "qtpy-relay-controller 1.2.0",
+    checkEq(cmd("VERSION"), "qtpy-relay-controller 1.3.0",
             "VERSION no longer doubles as the identity command");
   }
 

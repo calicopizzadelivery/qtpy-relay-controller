@@ -2,9 +2,14 @@
 #
 # Flash the firmware to the QT Py.
 #
-#   ./scripts/flash.sh            # pick whichever method is available
-#   ./scripts/flash.sh --uf2      # force drag-drop to the bootloader volume
-#   ./scripts/flash.sh --serial   # force arduino-cli upload over the port
+#   ./scripts/flash.sh --profile recovery          # pick the method for you
+#   ./scripts/flash.sh --profile relay8 --uf2      # force drag-drop
+#   ./scripts/flash.sh --profile relay8 --serial   # force serial upload
+#
+# --profile is mandatory. The two profiles drive different pins with opposite
+# polarity, so flashing the wrong one leaves a board's relays undriven and
+# floating -- which on the normally-closed 8-channel board can drop power to
+# its loads.
 #
 # --serial needs read/write on the board's tty (run scripts/host-setup.sh once).
 # --uf2 needs no permissions at all: the desktop automounts the bootloader
@@ -16,17 +21,34 @@ set -euo pipefail
 FQBN=adafruit:samd:adafruit_qtpy_m0
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 SKETCH="${REPO_ROOT}/firmware/relay-controller"
-UF2="${REPO_ROOT}/build/relay-controller.uf2"
 METHOD=auto
+PROFILE=
 
 export PATH="${HOME}/.local/bin:${PATH}"
 
-case "${1:-}" in
-  --uf2)    METHOD=uf2 ;;
-  --serial) METHOD=serial ;;
-  "")       ;;
-  *)        echo "usage: $0 [--uf2|--serial]" >&2; exit 2 ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --uf2)     METHOD=uf2; shift ;;
+    --serial)  METHOD=serial; shift ;;
+    --profile) PROFILE="${2:-}"; shift 2 ;;
+    *) echo "usage: $0 --profile relay8|recovery [--uf2|--serial]" >&2; exit 2 ;;
+  esac
+done
+
+case "${PROFILE}" in
+  relay8|recovery) ;;
+  "") echo "error: --profile is required (relay8 or recovery)" >&2; exit 2 ;;
+  *)  echo "error: unknown profile ${PROFILE}" >&2; exit 2 ;;
 esac
+
+OUT_DIR="${REPO_ROOT}/build/${PROFILE}"
+UF2="${OUT_DIR}/relay-controller.uf2"
+
+[[ -f ${UF2} ]] || {
+  echo "error: ${UF2} missing. run ./scripts/build.sh --profile ${PROFILE}" >&2
+  exit 1
+}
+echo "profile: ${PROFILE}"
 
 find_boot_volume() {
   # The QT Py M0's UF2 bootloader mounts as QTPY_BOOT. Accept the other
@@ -51,8 +73,6 @@ find_port() {
 }
 
 flash_uf2() {
-  [[ -f ${UF2} ]] || { echo "error: ${UF2} missing, run ./scripts/build.sh" >&2; exit 1; }
-
   local vol
   if ! vol=$(find_boot_volume); then
     cat >&2 <<'MSG'
@@ -80,8 +100,6 @@ flash_serial() {
     echo "error: no read/write on ${port}. run: sudo ./scripts/host-setup.sh" >&2
     exit 1
   fi
-  [[ -f ${REPO_ROOT}/build/relay-controller.ino.bin ]] || {
-    echo "error: build/ is empty, run ./scripts/build.sh" >&2; exit 1; }
   # bossac takes the device name and does not follow symlinks, so hand it the
   # real tty rather than our /dev/qtpy-relay alias. The board also re-enumerates
   # under its bootloader PID during the 1200-baud touch, which is why the alias
@@ -91,7 +109,7 @@ flash_serial() {
   # --input-dir pins the upload to the artifact build.sh produced, rather than
   # whatever happens to be in arduino-cli's build cache.
   arduino-cli upload --fqbn "${FQBN}" --port "${port}" \
-    --input-dir "${REPO_ROOT}/build" "${SKETCH}"
+    --input-dir "${OUT_DIR}" "${SKETCH}"
 }
 
 case "${METHOD}" in

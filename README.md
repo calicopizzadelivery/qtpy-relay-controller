@@ -52,10 +52,11 @@ Setting a channel outright cancels any pulse still running on it.
 
 ## Onboard RGB heartbeat
 
-The QT Py's onboard NeoPixel alternates green and blue once a second, so a
-glance at the board says the firmware is running and its loop is not wedged. It
-is a liveness indicator only — it does not encode relay state. Period and
-brightness are `LED_PERIOD_MS` and `LED_BRIGHTNESS` at the top of the sketch.
+The QT Py's onboard NeoPixel alternates two colours once a second, so a glance
+at the board says the firmware is running, its loop is not wedged, and which
+profile it carries: **green ↔ blue for `relay8`, green ↔ white for `recovery`**.
+It is a liveness indicator only — it does not encode relay state. Period,
+brightness and the two colours are at the top of the sketch.
 
 This is the sketch's one library dependency, Adafruit NeoPixel, which
 `scripts/install-toolchain.sh` installs.
@@ -91,6 +92,43 @@ The record is checksummed, so a half-written row after a power cut reads back as
 `INFO` also reports the SAMD21's factory serial. That is the same value the core
 hashes into the USB serial string, so it ties a console session to a specific
 `/dev/serial/by-id/` path.
+
+## Board profiles
+
+Two different boards run this firmware. They differ in more than channel count,
+so the profile is chosen **at build time** and reported by `INFO`.
+
+| | `relay8` | `recovery` |
+|---|---|---|
+| Channels | 8 — A0–A3, MOSI, MISO, SCK, RX | 1 — TX (pin 6) |
+| Relay contacts | normally **closed** | normally **open** |
+| `ON` means | load powered — pin **LOW** | FORCE_RECOVERY asserted — pin **HIGH** |
+| Boots | all `ON` (never silently drop power) | `OFF` (never silently enter recovery) |
+| Heartbeat | green ↔ blue | green ↔ white |
+
+Both speak the same wire protocol: **`ON` means the thing the board exists to
+do is happening.** The polarity inversion lives in one place in the firmware
+(`ON_LEVEL`/`OFF_LEVEL`), so nothing downstream — scripts included — has to
+know which way the contacts are wired.
+
+The `recovery` board grounds the Jetson's FORCE_RECOVERY pin so the module can
+be flashed:
+
+```
+ON 1                  # hold FORCE_RECOVERY grounded
+PULSE 1 ON 5000       # hold it for five seconds, then release
+OFF 1                 # release
+```
+
+Its boot state is the important half. A normally-open relay that came up
+asserted would put the Jetson into recovery on every reset of the *controller*,
+so the recovery profile boots released and the sketch loads the output register
+LOW before enabling the pin driver.
+
+> **Flash the matching profile.** `flash.sh` requires `--profile` for this
+> reason. The wrong firmware leaves a board's relays undriven and floating —
+> harmless on the recovery board, but on the normally-closed 8-channel board
+> the relay module's own input bias then decides whether your loads keep power.
 
 ## Wiring and polarity
 
@@ -161,18 +199,14 @@ port it is powered from.
 ## Build and flash
 
 ```bash
-./scripts/install-toolchain.sh   # arduino-cli + SAMD cores into ~/.local/bin
-./scripts/build.sh               # -> build/relay-controller.{bin,uf2}
-./scripts/flash.sh               # UF2 drag-drop or serial upload
+./scripts/install-toolchain.sh              # arduino-cli, SAMD cores, NeoPixel
+./scripts/build.sh                          # both profiles -> build/<profile>/
+./scripts/build.sh --profile recovery       # just the one
+./scripts/flash.sh --profile recovery       # UF2 drag-drop or serial upload
 ```
 
-A board with fewer relays wired builds the same source with a smaller channel
-count; channels are taken from the front of the table above, so a one-channel
-build drives A0 alone:
-
-```bash
-./scripts/build.sh --channels 1
-```
+Artifacts land in `build/<profile>/` so the two can never be confused at flash
+time, and `--profile` is mandatory when flashing.
 
 `flash.sh` picks whichever route is available. Force one with `--uf2` or
 `--serial`.
@@ -231,26 +265,35 @@ under you. `relayctl.py` always uses 115200.
 ./test/run-tests.sh
 ```
 
-122 checks. Compiles the sketch against a small Arduino shim and exercises the
-parser, pulse engine and identity store natively — no hardware needed. Covers
-the channel map, pulse revert semantics including a `millis()` rollover, pulse
-cancellation, identity round-trips across a simulated reboot, case
-preservation, rejection of a corrupted identity row, and rejection of malformed
-input generally. It also asserts that `setup()` loads each output register
-*before* enabling the pin driver, which is what keeps the relays from glitching
-at boot.
+159 checks, run once per board profile. The sketch is built against a small
+Arduino shim and exercised natively — no hardware needed.
+
+Covers the channel map, pulse revert semantics including a `millis()` rollover,
+pulse cancellation, identity round-trips across a simulated reboot, case
+preservation, rejection of a corrupted identity row, heartbeat colours and
+period, and rejection of malformed input generally.
+
+Two assertions are there to catch the mistakes that would be expensive on real
+hardware: that `setup()` loads each output register *before* enabling the pin
+driver, which is what keeps the relays from glitching at boot; and that the
+`recovery` profile comes up **released**, with its pin LOW, since a
+normally-open relay booting asserted would drop the Jetson into recovery on
+every reset of the controller.
 
 ## Layout
 
 ```
-firmware/relay-controller/   the sketch
-scripts/install-toolchain.sh arduino-cli + SAMD cores, no root
-scripts/build.sh             compile, emit .bin and .uf2, guard the ID row
-scripts/flash.sh             UF2 drag-drop or serial upload
+firmware/relay-controller/   the sketch, both profiles
+scripts/install-toolchain.sh arduino-cli + SAMD cores + NeoPixel, no root
+scripts/build.sh             compile per profile, guard the identity row
+scripts/flash.sh             UF2 drag-drop or serial upload, --profile required
 scripts/host-setup.sh        one-time root: udev rule, dialout, stable symlink
 tools/relayctl.py            host CLI
+tools/map-ports.py           map channels to USB hub ports empirically
 tools/bin2uf2.py             raw .bin -> UF2 container
-test/                        host-side tests
+test/test_relay.cpp          relay8 profile tests
+test/test_recovery.cpp       recovery profile tests
+docs/port-map.md             the surveyed bench wiring
 ```
 
 ## Licence

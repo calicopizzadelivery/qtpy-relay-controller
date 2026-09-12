@@ -29,6 +29,7 @@
 #define PIN_A1          (1ul)
 #define PIN_A2          (2ul)
 #define PIN_A3          (3ul)
+#define PIN_SERIAL1_TX  (6ul)
 #define PIN_SERIAL1_RX  (7ul)
 #define PIN_SPI_SCK     (8u)
 #define PIN_SPI_MISO    (9u)

@@ -143,6 +143,7 @@ def resolve_port(explicit: str, want_id: str, timeout: float) -> str:
             lines.append(f"  {port}  unreachable: {info['_error']}")
         else:
             lines.append(f"  {port}  id={info.get('id', '?')} "
+                         f"profile={info.get('profile', '?')} "
                          f"channels={info.get('channels', '?')}")
     sys.exit("\n".join(lines))
 
@@ -160,6 +161,7 @@ def cmd_list(timeout: float) -> int:
             failed += 1
         else:
             print(f"{port}\n    id       {info.get('id', '?')}\n"
+                  f"    profile  {info.get('profile', '?')}\n"
                   f"    channels {info.get('channels', '?')}\n"
                   f"    firmware {info.get('fw', '?')} {info.get('ver', '?')}\n"
                   f"    serial   {info.get('serial', '?')}")

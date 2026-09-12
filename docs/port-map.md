@@ -79,3 +79,27 @@ They say nothing about whether the **module** boots.
 
 Narrow `--channels` to keep the sweep away from anything that must not be
 power-cycled; on this rig that is channel 6.
+
+## Verified recovery entry (2026-09-12)
+
+`tools/enter-recovery.py` puts the Nano into USB recovery, confirmed by an A/B
+against the same power cycle with FORCE_RECOVERY left released:
+
+| FORCE_RECOVERY | Result |
+|---|---|
+| asserted across power-on | `0955:7f21` APX, console silent |
+| released | `0955:7020` L4T gadget, full boot log to `nano-1 login:` |
+
+Two things about detection are worth knowing, because both produced a wrong
+answer before they were understood.
+
+**The module never leaves its USB path.** Booted it is `0955:7020`, in recovery
+`0955:7f21`, both at the same address. Diffing by USB path alone reports a
+successful recovery entry as "no change". Compare product ids.
+
+**Presence alone does not prove causality.** A module already in recovery
+satisfies "is an RCM device on the bus" at t+0, so the tool waits for the module
+to actually leave the bus during the power cut before accepting a later
+appearance as its own doing. Without that it returns a confident false positive,
+and it exits 2 for INCONCLUSIVE if the module never left the bus — which is also
+how a power cut that is not reaching the module presents.

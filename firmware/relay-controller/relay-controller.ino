@@ -1,0 +1,432 @@
+/*
+ * qtpy-relay-controller — 8-channel relay control over USB serial
+ *
+ * Target: Adafruit QT Py M0 (SAMD21E18), FQBN adafruit:samd:adafruit_qtpy_m0
+ *
+ * Wiring / channel map
+ * -------------------
+ *   Ch  Pad    Arduino pin
+ *   1   A0     0
+ *   2   A1     1
+ *   3   A2     2
+ *   4   A3     3
+ *   5   MOSI   10
+ *   6   MISO   9
+ *   7   SCK    8
+ *   8   RX     7
+ *
+ * Relay polarity
+ * --------------
+ * The relay modules are normally closed: driving a channel HIGH energises the
+ * coil, opens the contacts and cuts power to the attached device. This firmware
+ * speaks in terms of the *load*, not the coil:
+ *
+ *   ON  -> pin LOW  -> contacts closed -> device powered
+ *   OFF -> pin HIGH -> contacts open   -> device unpowered
+ *
+ * All channels come up ON, so a reset or reflash never silently drops power.
+ * Note that the pins float for a few hundred ms during bootloader startup,
+ * before setup() runs; the relay board's own input bias decides the state
+ * during that window.
+ *
+ * Pin 7 is the Serial1 RX pin. Serial1.begin() is never called, so the pin
+ * stays a plain GPIO. Do not add Serial1 to this sketch without remapping
+ * channel 8.
+ *
+ * Protocol: see printHelp() below, or send HELP.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#define FW_NAME     "qtpy-relay-controller"
+#define FW_VERSION  "1.0.0"
+
+static const uint8_t NUM_RELAYS = 8;
+
+/* Boot state for every channel: true = powered. */
+static const bool BOOT_POWERED = true;
+
+/* Longest accepted pulse, in milliseconds. */
+static const uint32_t MAX_PULSE_MS = 3600000UL;
+
+static const uint8_t RELAY_PIN[NUM_RELAYS] = {
+  PIN_A0,          /* ch1  A0   */
+  PIN_A1,          /* ch2  A1   */
+  PIN_A2,          /* ch3  A2   */
+  PIN_A3,          /* ch4  A3   */
+  PIN_SPI_MOSI,    /* ch5  MOSI */
+  PIN_SPI_MISO,    /* ch6  MISO */
+  PIN_SPI_SCK,     /* ch7  SCK  */
+  PIN_SERIAL1_RX   /* ch8  RX   */
+};
+
+static const char* const RELAY_PAD[NUM_RELAYS] = {
+  "A0", "A1", "A2", "A3", "MOSI", "MISO", "SCK", "RX"
+};
+
+static bool     relayPowered[NUM_RELAYS];
+static bool     pulseActive[NUM_RELAYS];
+static uint32_t pulseDeadline[NUM_RELAYS];   /* millis() value to revert at */
+static bool     pulseRestore[NUM_RELAYS];    /* state to revert to */
+
+/* ------------------------------------------------------------------ */
+/* Relay primitives                                                    */
+/* ------------------------------------------------------------------ */
+
+static inline void driveChannel(uint8_t idx, bool powered)
+{
+  digitalWrite(RELAY_PIN[idx], powered ? LOW : HIGH);
+  relayPowered[idx] = powered;
+}
+
+/* Set a channel and cancel any pulse in flight on it. */
+static void setChannel(uint8_t idx, bool powered)
+{
+  pulseActive[idx] = false;
+  driveChannel(idx, powered);
+}
+
+static void pulseChannel(uint8_t idx, bool powered, uint32_t ms)
+{
+  /* Revert to whatever the channel was doing before this pulse. If a pulse
+     was already running, that is its pending restore state, not the live
+     pin state. */
+  bool restore = pulseActive[idx] ? pulseRestore[idx] : relayPowered[idx];
+
+  driveChannel(idx, powered);
+  pulseRestore[idx]  = restore;
+  pulseDeadline[idx] = millis() + ms;
+  pulseActive[idx]   = true;
+}
+
+/* Revert any pulse whose deadline has passed. Rollover-safe: the subtraction
+   is done in signed 32-bit, so it stays correct across the millis() wrap. */
+static void servicePulses(void)
+{
+  uint32_t now = millis();
+  for (uint8_t i = 0; i < NUM_RELAYS; i++) {
+    if (pulseActive[i] && (int32_t)(now - pulseDeadline[i]) >= 0) {
+      pulseActive[i] = false;
+      driveChannel(i, pulseRestore[i]);
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Reporting                                                           */
+/* ------------------------------------------------------------------ */
+
+static void printState(void)
+{
+  Serial.print("STATE");
+  for (uint8_t i = 0; i < NUM_RELAYS; i++) {
+    Serial.print(' ');
+    Serial.print(i + 1);
+    Serial.print('=');
+    Serial.print(relayPowered[i] ? "ON" : "OFF");
+    if (pulseActive[i]) {
+      /* Remaining time, clamped at 0 in case we race the deadline. */
+      int32_t remain = (int32_t)(pulseDeadline[i] - millis());
+      if (remain < 0) remain = 0;
+      Serial.print("(pulse ");
+      Serial.print(remain);
+      Serial.print("ms)");
+    }
+  }
+  Serial.println();
+}
+
+static void printHelp(void)
+{
+  Serial.println("commands (case-insensitive, one per line):");
+  Serial.println("  ON <n>            power channel n on   (pin LOW, relay closed)");
+  Serial.println("  OFF <n>           power channel n off  (pin HIGH, relay open)");
+  Serial.println("  ON ALL | OFF ALL  all channels at once");
+  Serial.println("  ALL ON | ALL OFF  same thing, other word order");
+  Serial.println("  RELAY <n> ON|OFF|TOGGLE");
+  Serial.println("  TOGGLE <n>|ALL");
+  Serial.println("  PULSE <n>|ALL <ms>            invert for <ms>, then revert");
+  Serial.println("  PULSE <n>|ALL ON|OFF <ms>     hold that state for <ms>, then revert");
+  Serial.println("  GET <n>           report one channel");
+  Serial.println("  STATE             report all channels");
+  Serial.println("  PINS              report the channel-to-pad map");
+  Serial.println("  VERSION           firmware name and version");
+  Serial.println("  HELP              this text");
+  Serial.print("  channels 1-");
+  Serial.print(NUM_RELAYS);
+  Serial.print(", pulse 1-");
+  Serial.print(MAX_PULSE_MS);
+  Serial.println(" ms");
+}
+
+static void printPins(void)
+{
+  for (uint8_t i = 0; i < NUM_RELAYS; i++) {
+    Serial.print("PIN ");
+    Serial.print(i + 1);
+    Serial.print(' ');
+    Serial.print(RELAY_PAD[i]);
+    Serial.print(" D");
+    Serial.println(RELAY_PIN[i]);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Command parsing                                                     */
+/* ------------------------------------------------------------------ */
+
+/* 0 = ALL, 1..NUM_RELAYS = one channel, -1 = not a valid target. */
+static int parseTarget(const char* s)
+{
+  if (strcmp(s, "ALL") == 0) return 0;
+
+  char* end;
+  unsigned long v = strtoul(s, &end, 10);
+  if (end == s || *end != '\0') return -1;
+  if (v < 1 || v > NUM_RELAYS) return -1;
+  return (int)v;
+}
+
+/* 1 = ON, 0 = OFF, -1 = neither. */
+static int parseOnOff(const char* s)
+{
+  if (strcmp(s, "ON") == 0  || strcmp(s, "1") == 0) return 1;
+  if (strcmp(s, "OFF") == 0 || strcmp(s, "0") == 0) return 0;
+  return -1;
+}
+
+/* Returns false if s is not a bare unsigned integer. */
+static bool parseMillis(const char* s, uint32_t* out)
+{
+  char* end;
+  unsigned long v = strtoul(s, &end, 10);
+  if (end == s || *end != '\0') return false;
+  if (v < 1 || v > MAX_PULSE_MS) return false;
+  *out = (uint32_t)v;
+  return true;
+}
+
+static void applyToTarget(int target, bool powered)
+{
+  if (target == 0) {
+    for (uint8_t i = 0; i < NUM_RELAYS; i++) setChannel(i, powered);
+  } else {
+    setChannel((uint8_t)(target - 1), powered);
+  }
+}
+
+static void ackTarget(const char* verb, int target, const char* arg)
+{
+  Serial.print("OK ");
+  Serial.print(verb);
+  Serial.print(' ');
+  if (target == 0) Serial.print("ALL"); else Serial.print(target);
+  if (arg) { Serial.print(' '); Serial.print(arg); }
+  Serial.println();
+}
+
+static int tokenize(char* s, char** out, int maxTok)
+{
+  int n = 0;
+  char* p = s;
+  while (*p && n < maxTok) {
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) break;
+    out[n++] = p;
+    while (*p && *p != ' ' && *p != '\t') p++;
+    if (*p) *p++ = '\0';
+  }
+  return n;
+}
+
+static void handleLine(char* line)
+{
+  for (char* p = line; *p; p++) *p = toupper((unsigned char)*p);
+
+  char* tok[5];
+  int n = tokenize(line, tok, 5);
+  if (n == 0) return;                      /* blank line: stay quiet */
+
+  const char* cmd = tok[0];
+
+  if (strcmp(cmd, "HELP") == 0 || strcmp(cmd, "?") == 0) {
+    printHelp();
+    return;
+  }
+  if (strcmp(cmd, "VERSION") == 0 || strcmp(cmd, "ID") == 0) {
+    Serial.print(FW_NAME);
+    Serial.print(' ');
+    Serial.println(FW_VERSION);
+    return;
+  }
+  if (strcmp(cmd, "STATE") == 0 || strcmp(cmd, "STATUS") == 0) {
+    printState();
+    return;
+  }
+  if (strcmp(cmd, "PINS") == 0) {
+    printPins();
+    return;
+  }
+
+  /* GET <n> */
+  if (strcmp(cmd, "GET") == 0) {
+    if (n < 2) { Serial.println("ERR GET NEEDS A CHANNEL"); return; }
+    int target = parseTarget(tok[1]);
+    if (target < 0) { Serial.print("ERR BAD CHANNEL "); Serial.println(tok[1]); return; }
+    if (target == 0) { printState(); return; }
+    uint8_t i = (uint8_t)(target - 1);
+    Serial.print("OK GET ");
+    Serial.print(target);
+    Serial.print(' ');
+    Serial.println(relayPowered[i] ? "ON" : "OFF");
+    return;
+  }
+
+  /* ON <n|ALL> / OFF <n|ALL> */
+  int direct = parseOnOff(cmd);
+  if (direct >= 0) {
+    if (n < 2) { Serial.print("ERR "); Serial.print(cmd); Serial.println(" NEEDS A CHANNEL OR ALL"); return; }
+    int target = parseTarget(tok[1]);
+    if (target < 0) { Serial.print("ERR BAD CHANNEL "); Serial.println(tok[1]); return; }
+    applyToTarget(target, direct == 1);
+    ackTarget(direct == 1 ? "ON" : "OFF", target, NULL);
+    return;
+  }
+
+  /* ALL ON / ALL OFF / ALL TOGGLE */
+  if (strcmp(cmd, "ALL") == 0) {
+    if (n < 2) { Serial.println("ERR ALL NEEDS ON OR OFF"); return; }
+    if (strcmp(tok[1], "TOGGLE") == 0) {
+      for (uint8_t i = 0; i < NUM_RELAYS; i++) setChannel(i, !relayPowered[i]);
+      Serial.println("OK TOGGLE ALL");
+      return;
+    }
+    int want = parseOnOff(tok[1]);
+    if (want < 0) { Serial.print("ERR BAD STATE "); Serial.println(tok[1]); return; }
+    applyToTarget(0, want == 1);
+    ackTarget(want == 1 ? "ON" : "OFF", 0, NULL);
+    return;
+  }
+
+  /* RELAY <n|ALL> ON|OFF|TOGGLE */
+  if (strcmp(cmd, "RELAY") == 0) {
+    if (n < 3) { Serial.println("ERR RELAY NEEDS A CHANNEL AND A STATE"); return; }
+    int target = parseTarget(tok[1]);
+    if (target < 0) { Serial.print("ERR BAD CHANNEL "); Serial.println(tok[1]); return; }
+    if (strcmp(tok[2], "TOGGLE") == 0) {
+      if (target == 0) for (uint8_t i = 0; i < NUM_RELAYS; i++) setChannel(i, !relayPowered[i]);
+      else setChannel((uint8_t)(target - 1), !relayPowered[target - 1]);
+      ackTarget("TOGGLE", target, NULL);
+      return;
+    }
+    int want = parseOnOff(tok[2]);
+    if (want < 0) { Serial.print("ERR BAD STATE "); Serial.println(tok[2]); return; }
+    applyToTarget(target, want == 1);
+    ackTarget(want == 1 ? "ON" : "OFF", target, NULL);
+    return;
+  }
+
+  /* TOGGLE <n|ALL> */
+  if (strcmp(cmd, "TOGGLE") == 0) {
+    if (n < 2) { Serial.println("ERR TOGGLE NEEDS A CHANNEL OR ALL"); return; }
+    int target = parseTarget(tok[1]);
+    if (target < 0) { Serial.print("ERR BAD CHANNEL "); Serial.println(tok[1]); return; }
+    if (target == 0) for (uint8_t i = 0; i < NUM_RELAYS; i++) setChannel(i, !relayPowered[i]);
+    else setChannel((uint8_t)(target - 1), !relayPowered[target - 1]);
+    ackTarget("TOGGLE", target, NULL);
+    return;
+  }
+
+  /* PULSE <n|ALL> [ON|OFF] <ms> */
+  if (strcmp(cmd, "PULSE") == 0) {
+    if (n < 3) { Serial.println("ERR PULSE NEEDS A CHANNEL AND A DURATION"); return; }
+    int target = parseTarget(tok[1]);
+    if (target < 0) { Serial.print("ERR BAD CHANNEL "); Serial.println(tok[1]); return; }
+
+    int want;
+    uint32_t ms;
+    if (n >= 4) {
+      want = parseOnOff(tok[2]);
+      if (want < 0) { Serial.print("ERR BAD STATE "); Serial.println(tok[2]); return; }
+      if (!parseMillis(tok[3], &ms)) { Serial.print("ERR BAD DURATION "); Serial.println(tok[3]); return; }
+    } else {
+      want = -1;                            /* invert whatever is live */
+      if (!parseMillis(tok[2], &ms)) { Serial.print("ERR BAD DURATION "); Serial.println(tok[2]); return; }
+    }
+
+    char msbuf[16];
+    if (target == 0) {
+      for (uint8_t i = 0; i < NUM_RELAYS; i++)
+        pulseChannel(i, want < 0 ? !relayPowered[i] : (want == 1), ms);
+    } else {
+      uint8_t i = (uint8_t)(target - 1);
+      pulseChannel(i, want < 0 ? !relayPowered[i] : (want == 1), ms);
+    }
+
+    /* Echo the state we pulsed to, so a bare PULSE is unambiguous. Per-channel
+       inversion of ALL can differ, so report INVERT in that case. */
+    Serial.print("OK PULSE ");
+    if (target == 0) Serial.print("ALL"); else Serial.print(target);
+    Serial.print(' ');
+    if (want < 0) Serial.print(target == 0 ? "INVERT" : (relayPowered[target - 1] ? "ON" : "OFF"));
+    else Serial.print(want == 1 ? "ON" : "OFF");
+    Serial.print(' ');
+    snprintf(msbuf, sizeof(msbuf), "%lu", (unsigned long)ms);
+    Serial.println(msbuf);
+    return;
+  }
+
+  Serial.print("ERR UNKNOWN COMMAND ");
+  Serial.println(cmd);
+}
+
+/* ------------------------------------------------------------------ */
+/* Arduino entry points                                                */
+/* ------------------------------------------------------------------ */
+
+void setup(void)
+{
+  for (uint8_t i = 0; i < NUM_RELAYS; i++) {
+    /* Load the output register before enabling the driver, so the pin never
+       glitches to the opposite state as it becomes an output. */
+    digitalWrite(RELAY_PIN[i], BOOT_POWERED ? LOW : HIGH);
+    pinMode(RELAY_PIN[i], OUTPUT);
+    driveChannel(i, BOOT_POWERED);
+    pulseActive[i] = false;
+  }
+
+  /* Baud is ignored on USB CDC. Never block on !Serial: this board has to run
+     headless. */
+  Serial.begin(115200);
+}
+
+void loop(void)
+{
+  static char    buf[64];
+  static uint8_t len = 0;
+  static bool    overflow = false;
+
+  servicePulses();
+
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+
+    if (c == '\n' || c == '\r') {
+      if (overflow) {
+        Serial.println("ERR LINE TOO LONG");
+        overflow = false;
+      } else {
+        buf[len] = '\0';
+        handleLine(buf);
+      }
+      len = 0;
+      continue;
+    }
+
+    if (len < sizeof(buf) - 1) {
+      buf[len++] = c;
+    } else {
+      overflow = true;                      /* drop the rest of the line */
+    }
+  }
+}

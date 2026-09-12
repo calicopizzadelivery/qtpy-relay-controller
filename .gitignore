@@ -1,0 +1,10 @@
+# Compiler output
+/build/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editors
+.vscode/
+*.swp

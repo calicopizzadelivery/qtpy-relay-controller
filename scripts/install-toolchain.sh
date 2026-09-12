@@ -29,5 +29,8 @@ arduino-cli core install arduino:samd
 arduino-cli core install adafruit:samd
 arduino-cli core list
 
+# The sketch's only library dependency, for the onboard RGB heartbeat.
+arduino-cli lib install "Adafruit NeoPixel"
+
 echo
 echo "done. if ${BINDIR} is not on your PATH, add it to your shell profile."

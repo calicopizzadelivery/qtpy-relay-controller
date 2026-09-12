@@ -20,6 +20,7 @@ ShimSerial  Serial;
    erased, exactly as a never-written row reads. */
 uint8_t hostFlashPage[FLASH_PAGE_SIZE];
 int     hostFlashWrites;
+int     hostLedGreen = -1;
 
 #include "../firmware/relay-controller/relay-controller.ino"
 
@@ -69,6 +70,7 @@ static void advance(uint32_t ms)
 {
   shimMillis += ms;
   servicePulses();
+  serviceHeartbeat();
 }
 
 static void section(const char* name) { std::cout << name << "\n"; }
@@ -96,6 +98,8 @@ int main(void)
     check(firstWrite != std::string::npos && firstMode != std::string::npos &&
           firstWrite < firstMode,
           "output register is loaded before the driver is enabled");
+
+    check(hostLedGreen == 1, "the pixel comes up green");
   }
 
   section("channel map");
@@ -248,6 +252,29 @@ int main(void)
     cmd("ON 3");
   }
 
+  section("heartbeat");
+  {
+    /* Earlier sections advanced the clock, so the heartbeat phase is arbitrary
+       by now. Re-align it before measuring the period. */
+    ledLast      = shimMillis;
+    ledGreen     = true;
+    hostLedGreen = 1;
+
+    advance(999);
+    check(hostLedGreen == 1, "holds just short of the period");
+    advance(1);
+    check(hostLedGreen == 0, "flips to blue on the period");
+    advance(1000);
+    check(hostLedGreen == 1, "and back to green");
+
+    /* Same rollover exposure as the pulse deadlines. */
+    shimMillis = 0xFFFFFF00UL;
+    ledLast    = shimMillis;
+    int before = hostLedGreen;
+    advance(1000);
+    check(hostLedGreen != before, "keeps flipping across the millis wrap");
+  }
+
   section("identity: defaults and round-trip");
   {
     checkEq(cmd("ID"), "OK ID UNSET", "an erased row reads back as UNSET");
@@ -313,10 +340,10 @@ int main(void)
   section("identity: INFO");
   {
     checkEq(cmd("INFO"),
-            "OK INFO id=relay8 fw=qtpy-relay-controller ver=1.1.0 "
+            "OK INFO id=relay8 fw=qtpy-relay-controller ver=1.2.0 "
             "channels=8 serial=HOSTTEST",
             "INFO reports identity, firmware, channels and chip serial");
-    checkEq(cmd("VERSION"), "qtpy-relay-controller 1.1.0",
+    checkEq(cmd("VERSION"), "qtpy-relay-controller 1.2.0",
             "VERSION no longer doubles as the identity command");
   }
 

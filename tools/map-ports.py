@@ -120,9 +120,18 @@ def main() -> int:
 
     sp = relayctl.open_port(port, 1.0)
     results = {}
+    baseline = usb_devices()
+    print(f"baseline: {len(baseline)} USB devices\n")
     try:
         for ch in channels:
-            before = usb_devices()
+            # A device that failed to come back from the previous channel would
+            # otherwise be silently attributed to this one.
+            before = wait_until(lambda s: not (set(baseline) - set(s)),
+                                args.restore)
+            missing = sorted(set(baseline) - set(before))
+            if missing:
+                print(f"  ! baseline not intact before channel {ch}: "
+                      f"missing {', '.join(missing)}")
 
             reply = relayctl.send(sp, f"OFF {ch}")
             if not any(r.startswith("OK") for r in reply):
@@ -133,8 +142,9 @@ def main() -> int:
             gone = sorted(set(before) - set(after))
 
             relayctl.send(sp, f"ON {ch}")
-            if gone:
-                wait_until(lambda s: not (set(gone) - set(s)), args.restore)
+
+            restored = wait_until(lambda s: not (set(gone) - set(s)), args.restore)
+            still_gone = sorted(set(gone) - set(restored))
 
             results[ch] = [(p, before[p]) for p in gone]
             if gone:
@@ -147,6 +157,8 @@ def main() -> int:
             else:
                 print(f"channel {ch} -> nothing dropped off "
                       f"(empty port, unswitched, or slower than --settle)")
+            if still_gone:
+                print(f"{'':10}   ! did NOT come back: {', '.join(still_gone)}")
     finally:
         # Never leave a load dark because this fell over part way through.
         print("\nrestoring every mapped channel")

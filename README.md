@@ -50,6 +50,16 @@ responsive throughout. A pulse reverts to whatever the channel was set to
 beforehand, so `PULSE 3 ON 500` on a channel that was off returns it to off.
 Setting a channel outright cancels any pulse still running on it.
 
+## Onboard RGB heartbeat
+
+The QT Py's onboard NeoPixel alternates green and blue once a second, so a
+glance at the board says the firmware is running and its loop is not wedged. It
+is a liveness indicator only — it does not encode relay state. Period and
+brightness are `LED_PERIOD_MS` and `LED_BRIGHTNESS` at the top of the sketch.
+
+This is the sketch's one library dependency, Adafruit NeoPixel, which
+`scripts/install-toolchain.sh` installs.
+
 ## Identity
 
 More than one of these boards ends up on the same host, so each carries an
@@ -117,13 +127,20 @@ On the bench this drives a USB hub whose per-port power is relay-switched:
 
 | Channel | Switches |
 |---|---|
-| 1–7 | Power to one USB device on the hub |
-| 8 | Power to the Jetson module, for a hard power cycle of the carrier board |
+| 1–5, 7, 8 | Power to one USB device on the hub |
+| **6** | **Power to the Jetson module**, for a hard power cycle of the carrier board |
+
+The surveyed channel-to-port map is in [docs/port-map.md](docs/port-map.md).
+Two things it records are worth repeating here: the relay board's *printed*
+channel numbers do not match the firmware's — its eighth relay is wired to MISO,
+which the console calls channel 6 — and the channel order does not follow
+physical hub port order. Generate the map with `tools/map-ports.py`; do not
+assume it.
 
 So a hard power cycle of the Jetson is one command:
 
 ```
-PULSE 8 OFF 5000
+PULSE 6 OFF 5000
 ```
 
 Five seconds dark, then power restored — and because pulses do not block, the

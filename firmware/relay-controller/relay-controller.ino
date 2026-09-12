@@ -45,8 +45,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#if !defined(RELAY_HOST_TEST)
+#include <Adafruit_NeoPixel.h>
+#endif
+
 #define FW_NAME     "qtpy-relay-controller"
-#define FW_VERSION  "1.1.0"
+#define FW_VERSION  "1.2.0"
+
+/* Onboard RGB heartbeat: alternates green and blue on a fixed period, so a
+   glance at the board tells you the firmware is running and its loop is not
+   wedged. Purely a liveness indicator -- it says nothing about relay state. */
+#define LED_PERIOD_MS   1000
+#define LED_BRIGHTNESS  32      /* of 255; the onboard pixel is very bright */
 
 /*
  * Channel count. A board with fewer relays wired builds the same source with
@@ -268,6 +278,48 @@ static void printInfo(void)
   Serial.print(" serial=");
   printChipSerial();
   Serial.println();
+}
+
+/* ------------------------------------------------------------------ */
+/* Onboard RGB heartbeat                                               */
+/* ------------------------------------------------------------------ */
+
+#if defined(RELAY_HOST_TEST)
+extern int hostLedGreen;                     /* 1 green, 0 blue, -1 unset */
+static void ledBegin(void) { }
+static void ledSet(bool green) { hostLedGreen = green ? 1 : 0; }
+#else
+static Adafruit_NeoPixel pixel(1, PIN_NEOPIXEL, NEO_GRB + NEO_KHZ800);
+
+static void ledBegin(void)
+{
+  pixel.begin();
+  pixel.setBrightness(LED_BRIGHTNESS);
+  pixel.show();
+}
+
+static void ledSet(bool green)
+{
+  /* show() bit-bangs with interrupts off, but only for about 30 us for a
+     single pixel, which USB does not notice. */
+  pixel.setPixelColor(0, green ? pixel.Color(0, 255, 0) : pixel.Color(0, 0, 255));
+  pixel.show();
+}
+#endif
+
+static uint32_t ledLast;
+static bool     ledGreen;
+
+/* Unsigned subtraction wraps correctly, so this survives the millis() rollover
+   the same way the pulse deadlines do. */
+static void serviceHeartbeat(void)
+{
+  uint32_t now = millis();
+  if ((uint32_t)(now - ledLast) >= (uint32_t)LED_PERIOD_MS) {
+    ledLast = now;
+    ledGreen = !ledGreen;
+    ledSet(ledGreen);
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -646,6 +698,11 @@ void setup(void)
 
   idLoad();
 
+  ledBegin();
+  ledGreen = true;
+  ledLast  = millis();
+  ledSet(ledGreen);
+
   /* Baud is ignored on USB CDC. Never block on !Serial: this board has to run
      headless. */
   Serial.begin(115200);
@@ -658,6 +715,7 @@ void loop(void)
   static bool    overflow = false;
 
   servicePulses();
+  serviceHeartbeat();
 
   while (Serial.available() > 0) {
     char c = (char)Serial.read();

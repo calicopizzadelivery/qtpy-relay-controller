@@ -292,10 +292,13 @@ tools/relayctl.py            host CLI
 tools/map-ports.py           map channels to USB hub ports empirically
 tools/enter-recovery.py      two-board FORCE_RECOVERY + power-cycle sequence
 tools/blink-channel.py       toggle one channel on a cadence you can meter
+tools/hdmi.py                grab and classify the Jetson's HDMI output
+tools/hdmi-preview.sh        live HDMI preview window plus a frame spool
 tools/bin2uf2.py             raw .bin -> UF2 container
 test/test_relay.cpp          relay8 profile tests
 test/test_recovery.cpp       recovery profile tests
 docs/port-map.md             the surveyed bench wiring
+docs/hdmi.md                 HDMI capture as a debug interface
 ```
 
 ## Licence

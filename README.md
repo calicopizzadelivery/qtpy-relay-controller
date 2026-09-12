@@ -5,7 +5,9 @@ USB serial, plus a host-side CLI.
 
 Built to power-cycle and recovery-mode a pile of NVIDIA Jetson Nano boards and
 the USB gear hanging off them, but there is nothing Jetson-specific in here —
-it is a general 8-channel switch you can talk to from a shell script.
+it is a general relay switch you can talk to from a shell script. Each board
+carries a persistent name, so several can share a host without a script ever
+having to guess which is which.
 
 ## The command set
 
@@ -24,6 +26,9 @@ case-insensitive.
 | `PULSE <n>\|ALL ON\|OFF <ms>` | Hold that state for *ms*, then revert |
 | `GET <n>` | Report one channel |
 | `STATE` | Report all channels |
+| `ID` | Report this board's identity |
+| `SETID <text>` | Persist a new identity, 1–8 characters |
+| `INFO` | Identity, firmware, channel count, chip serial |
 | `PINS` | Report the channel-to-pad map |
 | `VERSION` | Firmware name and version |
 | `HELP` | Command summary |
@@ -44,6 +49,38 @@ Pulses are non-blocking. Several can run at once, and the console stays
 responsive throughout. A pulse reverts to whatever the channel was set to
 beforehand, so `PULSE 3 ON 500` on a channel that was off returns it to off.
 Setting a channel outright cancels any pulse still running on it.
+
+## Identity
+
+More than one of these boards ends up on the same host, so each carries an
+eight-byte name:
+
+```
+> SETID relay8
+OK SETID relay8
+> INFO
+OK INFO id=relay8 fw=qtpy-relay-controller ver=1.1.0 channels=8 serial=92A4CF3E50555738332E3120FF172333
+```
+
+The name is 1–8 printable ASCII characters with no spaces, and **case is
+preserved** even though commands themselves are case-insensitive. An unnamed
+board reports `UNSET`.
+
+It persists in the last 256-byte row of flash, which sits deliberately outside
+the application image. Neither flash route disturbs it: the UF2 bootloader
+writes only the pages a UF2 file covers, and this board uploads through
+`bossac18`, whose command line carries no `-e` chip erase. **So the identity
+survives a firmware update** — which matters, because otherwise every reflash
+would leave both boards answering to the same name and a script could cut power
+to the wrong machine. `build.sh` refuses to link an image large enough to reach
+that row.
+
+The record is checksummed, so a half-written row after a power cut reads back as
+`UNSET` rather than as a corrupted name.
+
+`INFO` also reports the SAMD21's factory serial. That is the same value the core
+hashes into the USB serial string, so it ties a console session to a specific
+`/dev/serial/by-id/` path.
 
 ## Wiring and polarity
 
@@ -82,6 +119,14 @@ without remapping that channel first.
 ./scripts/flash.sh               # UF2 drag-drop or serial upload
 ```
 
+A board with fewer relays wired builds the same source with a smaller channel
+count; channels are taken from the front of the table above, so a one-channel
+build drives A0 alone:
+
+```bash
+./scripts/build.sh --channels 1
+```
+
 `flash.sh` picks whichever route is available. Force one with `--uf2` or
 `--serial`.
 
@@ -110,9 +155,10 @@ probing it with AT commands.
 ## Host CLI
 
 ```bash
+./tools/relayctl.py list               # every attached board and its identity
+./tools/relayctl.py setid relay8       # name this board
+./tools/relayctl.py --id relay8 off 3  # address one board by name
 ./tools/relayctl.py state
-./tools/relayctl.py off 3
-./tools/relayctl.py on all
 ./tools/relayctl.py pulse 2 500        # invert for 500 ms
 ./tools/relayctl.py pulse 2 off 500    # force off for 500 ms
 ./tools/relayctl.py console            # interactive
@@ -121,6 +167,12 @@ probing it with AT commands.
 Needs `pyserial`. It autodetects `/dev/qtpy-relay`, falling back to
 `/dev/serial/by-id/usb-Adafruit_QT_Py_M0*`. Exit status is non-zero when the
 firmware answers `ERR`, so it composes in shell scripts.
+
+**With more than one board attached, every command except `list` requires
+`--id` or `--port`.** It will not pick one for you — guessing risks cutting
+power to the wrong machine. `list` is also how you tell a permissions problem
+from an unresponsive board; the two look identical otherwise and point at
+opposite fixes.
 
 **Never open this port at 1200 baud.** On a SAMD21 with native USB that is the
 bootloader-entry handshake, not a normal open — the sketch will drop out from
@@ -132,19 +184,21 @@ under you. `relayctl.py` always uses 115200.
 ./test/run-tests.sh
 ```
 
-Compiles the sketch against a small Arduino shim and exercises the parser and
-pulse engine natively — no hardware needed. Covers the channel map, pulse
-revert semantics including a `millis()` rollover, pulse cancellation, and
-rejection of malformed input. It also asserts that `setup()` loads each output
-register *before* enabling the pin driver, which is what keeps the relays from
-glitching at boot.
+122 checks. Compiles the sketch against a small Arduino shim and exercises the
+parser, pulse engine and identity store natively — no hardware needed. Covers
+the channel map, pulse revert semantics including a `millis()` rollover, pulse
+cancellation, identity round-trips across a simulated reboot, case
+preservation, rejection of a corrupted identity row, and rejection of malformed
+input generally. It also asserts that `setup()` loads each output register
+*before* enabling the pin driver, which is what keeps the relays from glitching
+at boot.
 
 ## Layout
 
 ```
 firmware/relay-controller/   the sketch
 scripts/install-toolchain.sh arduino-cli + SAMD cores, no root
-scripts/build.sh             compile, emit .bin and .uf2
+scripts/build.sh             compile, emit .bin and .uf2, guard the ID row
 scripts/flash.sh             UF2 drag-drop or serial upload
 scripts/host-setup.sh        one-time root: udev rule, dialout, stable symlink
 tools/relayctl.py            host CLI

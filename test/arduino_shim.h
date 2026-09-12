@@ -7,12 +7,17 @@
  */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <cctype>
 #include <string>
+
+/* Flash geometry, from samd21e18a.h */
+#define FLASH_SIZE      0x40000UL
+#define FLASH_PAGE_SIZE 64
 
 #define LOW    0
 #define HIGH   1

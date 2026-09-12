@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#define RELAY_HOST_TEST 1
 #include "arduino_shim.h"
 
 int         shimPinState[SHIM_MAX_PIN];
@@ -14,6 +15,11 @@ int         shimPinMode[SHIM_MAX_PIN];
 uint32_t    shimMillis;
 std::string shimPinTrace;
 ShimSerial  Serial;
+
+/* Stands in for the flash row the firmware persists its identity to. Starts
+   erased, exactly as a never-written row reads. */
+uint8_t hostFlashPage[FLASH_PAGE_SIZE];
+int     hostFlashWrites;
 
 #include "../firmware/relay-controller/relay-controller.ino"
 
@@ -69,6 +75,8 @@ static void section(const char* name) { std::cout << name << "\n"; }
 
 int main(void)
 {
+  memset(hostFlashPage, 0xFF, sizeof(hostFlashPage));   /* virgin flash */
+  hostFlashWrites = 0;
   shimMillis = 1000;
   setup();
 
@@ -238,6 +246,78 @@ int main(void)
     cmd("ON 3");
     checkEq(cmd("\tOFF\t3"), "OK OFF 3", "tabs are accepted");
     cmd("ON 3");
+  }
+
+  section("identity: defaults and round-trip");
+  {
+    checkEq(cmd("ID"), "OK ID UNSET", "an erased row reads back as UNSET");
+
+    checkEq(cmd("SETID relay8"), "OK SETID relay8", "SETID acknowledges");
+    checkEq(cmd("ID"), "OK ID relay8", "the identity reads back");
+    check(hostFlashWrites == 1, "exactly one flash write");
+
+    /* Reboot: drop the RAM copy and reload from the persisted row. */
+    memset(deviceId, 0, sizeof(deviceId));
+    idLoad();
+    checkEq(cmd("ID"), "OK ID relay8", "the identity survives a reboot");
+  }
+
+  section("identity: case is preserved");
+  {
+    checkEq(cmd("SETID Relay1"), "OK SETID Relay1",
+            "mixed case survives the case-insensitive parser");
+    checkEq(cmd("ID"), "OK ID Relay1", "and reads back unchanged");
+    checkEq(cmd("setid LOWER"), "OK SETID LOWER", "the verb is still case-insensitive");
+  }
+
+  section("identity: full eight bytes");
+  {
+    checkEq(cmd("SETID 12345678"), "OK SETID 12345678", "eight characters fit");
+    memset(deviceId, 0, sizeof(deviceId));
+    idLoad();
+    checkEq(cmd("ID"), "OK ID 12345678", "eight characters survive a reboot");
+  }
+
+  section("identity: rewrites are skipped");
+  {
+    cmd("SETID samename");
+    int before = hostFlashWrites;
+    checkEq(cmd("SETID samename"), "OK SETID samename", "a no-op SETID still acks");
+    check(hostFlashWrites == before, "but does not touch the flash again");
+    cmd("SETID relay8");
+    check(hostFlashWrites == before + 1, "a genuine change does write");
+  }
+
+  section("identity: bad input is refused");
+  {
+    checkEq(cmd("SETID 123456789"), "ERR BAD ID 123456789", "nine characters is too long");
+    checkEq(cmd("SETID a b"), "ERR ID MUST NOT CONTAIN SPACES", "spaces are refused");
+    check(cmd("SETID").rfind("ERR", 0) == 0, "SETID with no value is refused");
+    checkEq(cmd("SETID a\x7f"), "ERR BAD ID A\x7f", "non-printable bytes are refused");
+    checkEq(cmd("ID"), "OK ID relay8", "no refusal disturbed the stored identity");
+  }
+
+  section("identity: a corrupt row falls back to UNSET");
+  {
+    hostFlashPage[6] ^= 0xFF;              /* flip a bit inside the name */
+    memset(deviceId, 0, sizeof(deviceId));
+    idLoad();
+    checkEq(cmd("ID"), "OK ID UNSET", "a failed hash is not read back as a name");
+
+    cmd("SETID relay8");                   /* and it recovers on the next write */
+    memset(deviceId, 0, sizeof(deviceId));
+    idLoad();
+    checkEq(cmd("ID"), "OK ID relay8", "rewriting repairs the row");
+  }
+
+  section("identity: INFO");
+  {
+    checkEq(cmd("INFO"),
+            "OK INFO id=relay8 fw=qtpy-relay-controller ver=1.1.0 "
+            "channels=8 serial=HOSTTEST",
+            "INFO reports identity, firmware, channels and chip serial");
+    checkEq(cmd("VERSION"), "qtpy-relay-controller 1.1.0",
+            "VERSION no longer doubles as the identity command");
   }
 
   std::cout << "\n" << (checks - failures) << "/" << checks << " checks passed\n";

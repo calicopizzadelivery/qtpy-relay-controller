@@ -33,15 +33,39 @@
  * stays a plain GPIO. Do not add Serial1 to this sketch without remapping
  * channel 8.
  *
+ * Identity
+ * --------
+ * Each board stores an eight-byte name (SETID / ID / INFO) in the last row of
+ * flash, outside the application image, so it survives a reflash. Several
+ * boards can then share a host without a script having to guess which is
+ * which. See the identity section further down.
+ *
  * Protocol: see printHelp() below, or send HELP.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
 #define FW_NAME     "qtpy-relay-controller"
-#define FW_VERSION  "1.0.0"
+#define FW_VERSION  "1.1.0"
 
-static const uint8_t NUM_RELAYS = 8;
+/*
+ * Channel count. A board with fewer relays wired builds the same source with
+ * a smaller count; channels are taken from the front of RELAY_PIN, so a
+ * one-channel build drives A0 alone. Build a variant with:
+ *
+ *   arduino-cli compile --build-property compiler.cpp.extra_flags=-DRELAY_CHANNELS=1
+ *
+ * (compiler.cpp.extra_flags is additive; build.extra_flags would clobber the
+ * board's own -D flags.)
+ */
+#ifndef RELAY_CHANNELS
+#define RELAY_CHANNELS 8
+#endif
+
+static const uint8_t NUM_RELAYS = RELAY_CHANNELS;
+
+/* Longest command line accepted, including the terminator. */
+#define LINE_BUF 64
 
 /* Boot state for every channel: true = powered. */
 static const bool BOOT_POWERED = true;
@@ -49,7 +73,7 @@ static const bool BOOT_POWERED = true;
 /* Longest accepted pulse, in milliseconds. */
 static const uint32_t MAX_PULSE_MS = 3600000UL;
 
-static const uint8_t RELAY_PIN[NUM_RELAYS] = {
+static const uint8_t RELAY_PIN[8] = {
   PIN_A0,          /* ch1  A0   */
   PIN_A1,          /* ch2  A1   */
   PIN_A2,          /* ch3  A2   */
@@ -60,14 +84,191 @@ static const uint8_t RELAY_PIN[NUM_RELAYS] = {
   PIN_SERIAL1_RX   /* ch8  RX   */
 };
 
-static const char* const RELAY_PAD[NUM_RELAYS] = {
+static const char* const RELAY_PAD[8] = {
   "A0", "A1", "A2", "A3", "MOSI", "MISO", "SCK", "RX"
 };
+
+static_assert(RELAY_CHANNELS >= 1 && RELAY_CHANNELS <= 8,
+              "RELAY_CHANNELS must be between 1 and 8");
 
 static bool     relayPowered[NUM_RELAYS];
 static bool     pulseActive[NUM_RELAYS];
 static uint32_t pulseDeadline[NUM_RELAYS];   /* millis() value to revert at */
 static bool     pulseRestore[NUM_RELAYS];    /* state to revert to */
+
+/* ------------------------------------------------------------------ */
+/* Device identity, persisted in flash                                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * More than one of these boards hangs off the same host, so each carries an
+ * eight-byte name the host can read back and match against. It lives in the
+ * last 256-byte row of flash, deliberately outside the application image:
+ * neither the UF2 bootloader nor bossac18 (whose upload pattern carries no
+ * -e) erases beyond the pages an image covers, so the identity survives a
+ * reflash. scripts/build.sh refuses to link an image that would reach it.
+ */
+
+#define ID_LEN 8
+
+static const uint32_t ID_MAGIC = 0x52594C52UL;   /* "RLYR" */
+static const char     ID_UNSET[] = "UNSET";
+
+struct IdRecord {
+  uint32_t magic;
+  uint8_t  len;
+  uint8_t  id[ID_LEN];
+  uint8_t  pad[3];
+  uint32_t hash;                             /* must stay the last member */
+};
+
+/* NUL-terminated working copy, refreshed from flash at boot. */
+static char deviceId[ID_LEN + 1];
+
+#if defined(RELAY_HOST_TEST)
+extern uint8_t hostFlashPage[FLASH_PAGE_SIZE];
+extern int     hostFlashWrites;
+#define ID_STORAGE ((const uint8_t*)hostFlashPage)
+#else
+#define ID_STORAGE_ADDR (FLASH_SIZE - 256UL)   /* last row of the 256 KB flash */
+#define ID_STORAGE      ((const uint8_t*)ID_STORAGE_ADDR)
+#endif
+
+/* FNV-1a over every byte ahead of the hash field, so a half-written record
+   after a power cut is rejected rather than read back as a name. */
+static uint32_t idHash(const IdRecord* r)
+{
+  uint32_t h = 2166136261UL;
+  const uint8_t* p = (const uint8_t*)r;
+  for (size_t i = 0; i < offsetof(IdRecord, hash); i++) {
+    h ^= p[i];
+    h *= 16777619UL;
+  }
+  return h;
+}
+
+#if defined(RELAY_HOST_TEST)
+static bool idStorageWrite(const uint8_t* page)
+{
+  memcpy(hostFlashPage, page, FLASH_PAGE_SIZE);
+  hostFlashWrites++;
+  return true;
+}
+#else
+static void nvmExec(uint32_t cmd)
+{
+  NVMCTRL->ADDR.reg  = ID_STORAGE_ADDR / 2;     /* ADDR counts 16-bit words */
+  NVMCTRL->CTRLA.reg = cmd | NVMCTRL_CTRLA_CMDEX_KEY;
+  while (NVMCTRL->INTFLAG.bit.READY == 0) { }
+}
+
+static bool idStorageWrite(const uint8_t* page)
+{
+  /* Interrupts stay enabled. The SAMD21 has no read-while-write, so the core
+     stalls on instruction fetch until the NVM operation retires: a few
+     milliseconds of jitter, which USB rides out. Masking interrupts for the
+     same window would not help, and would cost the USB SOF handling. */
+  NVMCTRL->STATUS.reg = NVMCTRL_STATUS_MASK;    /* write-1-to-clear */
+
+  uint8_t manw = NVMCTRL->CTRLB.bit.MANW;
+  NVMCTRL->CTRLB.bit.MANW = 1;                  /* commit only on WP */
+
+  nvmExec(NVMCTRL_CTRLA_CMD_ER);                /* erase the row */
+  nvmExec(NVMCTRL_CTRLA_CMD_PBC);               /* clear the page buffer */
+
+  /* The page buffer takes 16- or 32-bit writes only, never bytes. */
+  volatile uint32_t* dst = (volatile uint32_t*)ID_STORAGE_ADDR;
+  for (uint32_t i = 0; i < FLASH_PAGE_SIZE / 4; i++) {
+    uint32_t word;
+    memcpy(&word, page + i * 4, sizeof(word));
+    dst[i] = word;
+  }
+
+  nvmExec(NVMCTRL_CTRLA_CMD_WP);                /* commit */
+
+  NVMCTRL->CTRLB.bit.MANW = manw;
+
+  return (NVMCTRL->STATUS.reg &
+          (NVMCTRL_STATUS_PROGE | NVMCTRL_STATUS_LOCKE | NVMCTRL_STATUS_NVME)) == 0;
+}
+#endif
+
+static void idLoad(void)
+{
+  IdRecord r;
+  memcpy(&r, ID_STORAGE, sizeof(r));
+
+  if (r.magic == ID_MAGIC && r.len >= 1 && r.len <= ID_LEN && r.hash == idHash(&r)) {
+    memcpy(deviceId, r.id, r.len);
+    deviceId[r.len] = '\0';
+  } else {
+    strcpy(deviceId, ID_UNSET);               /* erased, or failed its hash */
+  }
+}
+
+static bool idSave(const char* value, uint8_t len)
+{
+  uint8_t page[FLASH_PAGE_SIZE];
+  memset(page, 0xFF, sizeof(page));
+
+  IdRecord r;
+  memset(&r, 0, sizeof(r));                   /* zero the padding it hashes */
+  r.magic = ID_MAGIC;
+  r.len   = len;
+  memcpy(r.id, value, len);
+  r.hash  = idHash(&r);
+  memcpy(page, &r, sizeof(r));
+
+  if (!idStorageWrite(page)) return false;
+
+  memcpy(deviceId, value, len);
+  deviceId[len] = '\0';
+  return true;
+}
+
+/* 1..8 printable ASCII. Space is excluded because the parser splits on it. */
+static bool idValid(const char* s, uint8_t* lenOut)
+{
+  size_t n = strlen(s);
+  if (n < 1 || n > ID_LEN) return false;
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (c < 0x21 || c > 0x7E) return false;
+  }
+  *lenOut = (uint8_t)n;
+  return true;
+}
+
+static void printChipSerial(void)
+{
+#if defined(RELAY_HOST_TEST)
+  Serial.print("HOSTTEST");
+#else
+  /* SAMD21 factory serial: one word at 0x0080A00C, three more at 0x0080A040.
+     This is what the core hashes into the USB serial string, so it ties a
+     console session to a /dev/serial/by-id path. */
+  static const uint32_t addr[4] = {
+    0x0080A00CUL, 0x0080A040UL, 0x0080A044UL, 0x0080A048UL
+  };
+  char buf[9];
+  for (int i = 0; i < 4; i++) {
+    snprintf(buf, sizeof(buf), "%08lX",
+             (unsigned long)(*(volatile uint32_t*)addr[i]));
+    Serial.print(buf);
+  }
+#endif
+}
+
+static void printInfo(void)
+{
+  Serial.print("OK INFO id=");
+  Serial.print(deviceId);
+  Serial.print(" fw=" FW_NAME " ver=" FW_VERSION " channels=");
+  Serial.print((unsigned int)NUM_RELAYS);
+  Serial.print(" serial=");
+  printChipSerial();
+  Serial.println();
+}
 
 /* ------------------------------------------------------------------ */
 /* Relay primitives                                                    */
@@ -150,6 +351,9 @@ static void printHelp(void)
   Serial.println("  GET <n>           report one channel");
   Serial.println("  STATE             report all channels");
   Serial.println("  PINS              report the channel-to-pad map");
+  Serial.println("  ID                report this board's identity");
+  Serial.println("  SETID <text>      persist a new identity (1-8 chars, no spaces)");
+  Serial.println("  INFO              identity, firmware, channel count, chip serial");
   Serial.println("  VERSION           firmware name and version");
   Serial.println("  HELP              this text");
   Serial.print("  channels 1-");
@@ -241,10 +445,20 @@ static int tokenize(char* s, char** out, int maxTok)
 
 static void handleLine(char* line)
 {
+  /* Commands are matched case-insensitively, but SETID has to preserve the
+     case it was given. Tokenising a verbatim copy alongside the uppercased
+     one gives both: uppercasing never moves a separator, so the two token
+     arrays line up index for index. */
+  char raw[LINE_BUF];
+  strncpy(raw, line, sizeof(raw) - 1);
+  raw[sizeof(raw) - 1] = '\0';
+
   for (char* p = line; *p; p++) *p = toupper((unsigned char)*p);
 
   char* tok[5];
+  char* rawTok[5];
   int n = tokenize(line, tok, 5);
+  tokenize(raw, rawTok, 5);
   if (n == 0) return;                      /* blank line: stay quiet */
 
   const char* cmd = tok[0];
@@ -253,10 +467,45 @@ static void handleLine(char* line)
     printHelp();
     return;
   }
-  if (strcmp(cmd, "VERSION") == 0 || strcmp(cmd, "ID") == 0) {
+  if (strcmp(cmd, "VERSION") == 0) {
     Serial.print(FW_NAME);
     Serial.print(' ');
     Serial.println(FW_VERSION);
+    return;
+  }
+  if (strcmp(cmd, "INFO") == 0) {
+    printInfo();
+    return;
+  }
+  if (strcmp(cmd, "ID") == 0) {
+    Serial.print("OK ID ");
+    Serial.println(deviceId);
+    return;
+  }
+  if (strcmp(cmd, "SETID") == 0) {
+    if (n < 2) { Serial.println("ERR SETID NEEDS A VALUE"); return; }
+    if (n > 2) { Serial.println("ERR ID MUST NOT CONTAIN SPACES"); return; }
+
+    /* rawTok mirrors tok on the untouched line, so the identity keeps the
+       case it was sent in even though commands are matched uppercased. */
+    const char* value = rawTok[1];
+    uint8_t len;
+    if (!idValid(value, &len)) {
+      Serial.print("ERR BAD ID ");
+      Serial.println(tok[1]);
+      return;
+    }
+    if (strcmp(value, deviceId) == 0) {       /* spare the flash a rewrite */
+      Serial.print("OK SETID ");
+      Serial.println(deviceId);
+      return;
+    }
+    if (!idSave(value, len)) {
+      Serial.println("ERR ID WRITE FAILED");
+      return;
+    }
+    Serial.print("OK SETID ");
+    Serial.println(deviceId);
     return;
   }
   if (strcmp(cmd, "STATE") == 0 || strcmp(cmd, "STATUS") == 0) {
@@ -395,6 +644,8 @@ void setup(void)
     pulseActive[i] = false;
   }
 
+  idLoad();
+
   /* Baud is ignored on USB CDC. Never block on !Serial: this board has to run
      headless. */
   Serial.begin(115200);
@@ -402,7 +653,7 @@ void setup(void)
 
 void loop(void)
 {
-  static char    buf[64];
+  static char    buf[LINE_BUF];
   static uint8_t len = 0;
   static bool    overflow = false;
 

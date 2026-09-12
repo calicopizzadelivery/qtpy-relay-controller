@@ -47,17 +47,40 @@ switched hub now:
 
 | Path | Channel | Device |
 |---|---|---|
-| `1-8.2.1` | 1 | CP2102N USB-UART — the Jetson's serial console, `/dev/ttyUSB0` |
+| `1-8.2.1` | **4** | CP2102N USB-UART — the Jetson's serial console, `/dev/ttyUSB0` |
 | `1-8.2.3` | 3 | the **recovery** QT Py controller |
+| `1-8.2.4.2` | 7 | FRDM-K64F OpenSDA (moves; see below) |
 | `1-8.2.4.4` | 5 | USB Video — HDMI capture |
+
+Read channels off the survey table above, not off port numbers. An earlier
+revision of this section listed the console adapter as channel 1 purely because
+its path ends in `.1`; it is actually channel 4, and channel 1 is `1-8.2.2`.
+Verify before cutting anything:
+
+```bash
+./tools/map-ports.py --channels 1-5,7,8
+```
+
+Devices also move between hub ports when they are replugged, so the occupant
+list goes stale in a way the channel-to-port map does not.
 
 > **The recovery controller is on a switched port.** `OFF 3` cuts power to the
 > board that holds FORCE_RECOVERY, and `OFF ALL` includes it. The `relay8`
 > controller itself is safely on the root hub at `1-1`, but this one is not.
 > Move it upstream of the relays, or keep channel 3 out of any sweep.
 
-Note that channel 1 now switches the console adapter: cutting it mid-flash
-would drop the UART, and channel 5 drops the HDMI capture.
+Note that channel 4 switches the console adapter: cutting it mid-flash would
+drop the UART, and channel 5 drops the HDMI capture.
+
+**The CP2102N can wedge.** It stayed enumerated and openable while delivering
+zero bytes, which looks exactly like a Jetson that is not booting — and was
+misread that way once. Power-cycling its channel clears it:
+
+```bash
+./tools/blink-channel.py --channel 4 --period 5 --cycles 1
+```
+
+Before concluding a silent console means a silent target, cycle the adapter.
 
 ## Channel 6, confirmed
 

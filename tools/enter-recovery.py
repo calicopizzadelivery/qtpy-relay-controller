@@ -101,12 +101,19 @@ def main() -> int:
                     help="channel switching Jetson module power (default 6, "
                          "from docs/port-map.md)")
     ap.add_argument("--off-seconds", type=float, default=5.0)
+    ap.add_argument("--cut", type=int, action="append", default=None,
+                    metavar="CH",
+                    help="channel feeding something that back-feeds 5V into "
+                         "the Jetson over USB; cut first and restored last, "
+                         "repeatable (default: 8, the FRDM-K64F)")
     ap.add_argument("--hold-after", type=float, default=3.0,
                     help="keep FORCE_RECOVERY asserted this long after power-on")
     ap.add_argument("--wait", type=float, default=20.0,
                     help="how long to watch for the APX device after power-on")
     ap.add_argument("--timeout", type=float, default=1.0)
     args = ap.parse_args()
+
+    cut = args.cut if args.cut is not None else [8]
 
     rec_sp, rec_port, rec_info = open_board(args.recovery_id, "recovery", args.timeout)
     pwr_sp, pwr_port, pwr_info = open_board(args.power_id, "relay8", args.timeout)
@@ -134,6 +141,13 @@ def main() -> int:
         say(f"  {reply}")
         if not any(r.startswith("OK") for r in reply):
             sys.exit("error: could not assert FORCE_RECOVERY")
+
+        # Cut the back-feed first. Without this the module never actually
+        # loses power -- it half-dies with the console silent, which looks
+        # exactly like a module that will not boot.
+        for ch in cut:
+            say(f"cutting back-feed source on channel {ch}")
+            say(f"  {relayctl.send(pwr_sp, f'OFF {ch}')}")
 
         say(f"cutting module power for {args.off_seconds:g}s")
         reply = relayctl.send(pwr_sp, f"OFF {args.power_channel}")
@@ -182,9 +196,11 @@ def main() -> int:
         if not found:
             say(f"  no NVIDIA device after {args.wait:g}s")
     finally:
-        # Neither of these may be left latched.
+        # None of these may be left latched.
         relayctl.send(rec_sp, f"OFF {args.recovery_channel}")
         relayctl.send(pwr_sp, f"ON {args.power_channel}")
+        for ch in cut:
+            relayctl.send(pwr_sp, f"ON {ch}")
         say("released FORCE_RECOVERY, module power on")
         print(f"  recovery: {relayctl.send(rec_sp, 'STATE')}")
         print(f"  power:    {relayctl.send(pwr_sp, 'STATE')}")

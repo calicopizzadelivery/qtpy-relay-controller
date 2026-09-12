@@ -71,6 +71,29 @@ Worth being precise about what that does and does not show. The LED and fan run
 from the carrier board's own 5 V rail, so they prove the **carrier** is powered.
 They say nothing about whether the **module** boots.
 
+## USB back-feed defeats a naive power cycle
+
+Anything externally powered plugged into the Jetson's USB ports feeds 5V back
+into its rail, so cutting channel 6 alone does not de-power the module. On this
+bench the FRDM-K64F does it: its OpenSDA port is powered from the host and its
+device port is plugged into the Jetson.
+
+The symptom is misleading. The module half-dies rather than resetting: the
+serial console goes completely silent, `usb=` on the injector stays `ready` for
+about 90 seconds after power-off, and the boot never completes — all of which
+reads as a dead module rather than a power problem.
+
+The FRDM's OpenSDA happens to sit on **channel 8**, so the fix is in software:
+cut the back-feed channel first, restore it last.
+
+```bash
+./tools/jetson-power.py cycle            # cuts ch8, then ch6, then restores
+./tools/enter-recovery.py                # does the same before its power cut
+```
+
+Both take `--cut CH` (repeatable) if something else is ever plugged into the
+Jetson's USB ports while externally powered.
+
 ## Regenerating
 
 ```bash

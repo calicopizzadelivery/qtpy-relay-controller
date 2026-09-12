@@ -292,6 +292,7 @@ tools/relayctl.py            host CLI
 tools/map-ports.py           map channels to USB hub ports empirically
 tools/enter-recovery.py      two-board FORCE_RECOVERY + power-cycle sequence
 tools/blink-channel.py       toggle one channel on a cadence you can meter
+tools/jetson-power.py        power cycle the Jetson, cutting USB back-feed first
 tools/hdmi.py                grab and classify the Jetson's HDMI output
 tools/hdmi-preview.sh        live HDMI preview window plus a frame spool
 tools/bin2uf2.py             raw .bin -> UF2 container

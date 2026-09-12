@@ -288,6 +288,9 @@ scripts/install-toolchain.sh arduino-cli + SAMD cores + NeoPixel, no root
 scripts/build.sh             compile per profile, guard the identity row
 scripts/flash.sh             UF2 drag-drop or serial upload, --profile required
 scripts/host-setup.sh        one-time root: udev rule, dialout, stable symlink
+scripts/l4t-prepare.sh       unpack an L4T BSP into a flashable tree
+scripts/l4t-flash.sh         flash the Jetson over USB recovery
+scripts/grant-automation.sh  root-owned copies + a narrow NOPASSWD sudoers rule
 tools/relayctl.py            host CLI
 tools/map-ports.py           map channels to USB hub ports empirically
 tools/enter-recovery.py      two-board FORCE_RECOVERY + power-cycle sequence

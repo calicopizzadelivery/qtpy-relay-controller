@@ -35,6 +35,11 @@ def find_device() -> str:
     metadata, which enumerates formats but yields no frames, so the capability
     bits are checked rather than just taking the lowest number.
     """
+    # The udev rule in scripts/host-setup.sh names the capture node; prefer
+    # it when present so a host never has to care which videoN it is today.
+    if os.path.exists("/dev/hdmi-capture"):
+        return "/dev/hdmi-capture"
+
     import glob as _glob
     for node in sorted(_glob.glob("/sys/class/video4linux/video*"),
                        key=lambda p: int(p.rsplit("video", 1)[1])):

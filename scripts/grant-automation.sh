@@ -47,9 +47,9 @@ install_pinned() {
   # tree the user controls.
   sed -e "s|^L4T_DIR=.*|L4T_DIR=${L4T_DIR}|" \
       -e 's|^REL=.*|REL=R32.7.6|' \
-      -e 's|^BOARD=.*|BOARD=jetson-nano-devkit|' \
+      -e 's|^DEFAULT_BOARD=.*|DEFAULT_BOARD=jetson-nano-emmc|' \
       -e 's|^TARGET=.*|TARGET=mmcblk0p1|' \
-      -e 's|^DEFAULT_DTB=.*|DEFAULT_DTB=tegra210-p3448-0000-p3449-0000-b00.dtb|' \
+      -e 's|^DEFAULT_DTB=.*|DEFAULT_DTB=auto|' \
       "${src}" > "${dst}.tmp"
   bash -n "${dst}.tmp" || { echo "error: ${dst} failed syntax check" >&2; exit 1; }
   install -o root -g root -m 0755 "${dst}.tmp" "${dst}"

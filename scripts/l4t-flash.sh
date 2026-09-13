@@ -15,7 +15,10 @@ set -euo pipefail
 
 L4T_DIR=${L4T_DIR:-/srv/build/l4t}
 TREE="${L4T_DIR}/Linux_for_Tegra"
-BOARD=${L4T_BOARD:-jetson-nano-devkit}
+# Board config. jetson-nano-emmc for a production module (P3448-0002, onboard
+# eMMC); jetson-nano-devkit for the microSD devkit module (P3448-0000).
+DEFAULT_BOARD=jetson-nano-emmc
+BOARD=""
 TARGET=${L4T_TARGET:-mmcblk0p1}
 
 # Carrier device tree.
@@ -31,8 +34,12 @@ TARGET=${L4T_TARGET:-mmcblk0p1}
 # directly instead (flash.sh line ~1816, mkfilepath prefers it over the value
 # process_board_version computed), leaving detection alone.
 #
-# Selectable so a02 and b00 can be compared without reinstalling this script.
-DEFAULT_DTB=tegra210-p3448-0000-p3449-0000-b00.dtb
+# "auto" leaves detection alone, which is correct whenever the module and
+# carrier are a matched pair: a FAB 300+ module reports itself honestly and
+# process_board_version picks b00 for its B01 carrier without help. Overriding
+# is only for mismatched parts, and forcing a tree the hardware disagrees with
+# is how this went wrong before.
+DEFAULT_DTB=auto
 DTB=""
 
 # Only --dtb <name> is accepted, and the name is validated against the device
@@ -41,14 +48,20 @@ DTB=""
 # flash at an arbitrary file.
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dtb) DTB="${2:-}"; shift 2 ;;
-    *) echo "usage: $0 [--dtb <name>.dtb]" >&2; exit 2 ;;
+    --dtb)   DTB="${2:-}"; shift 2 ;;
+    --board) BOARD="${2:-}"; shift 2 ;;
+    *) echo "usage: $0 [--board <name>] [--dtb auto|<name>.dtb]" >&2; exit 2 ;;
   esac
 done
 
 DTB="${DTB:-${DEFAULT_DTB}}"
-if [[ ! ${DTB} =~ ^[A-Za-z0-9._-]+\.dtb$ ]]; then
-  echo "error: --dtb must be a plain .dtb filename, got: ${DTB}" >&2
+BOARD="${BOARD:-${DEFAULT_BOARD}}"
+if [[ ! ${BOARD} =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "error: --board must be a plain config name, got: ${BOARD}" >&2
+  exit 2
+fi
+if [[ ${DTB} != auto && ! ${DTB} =~ ^[A-Za-z0-9._-]+\.dtb$ ]]; then
+  echo "error: --dtb must be auto or a plain .dtb filename, got: ${DTB}" >&2
   exit 2
 fi
 
@@ -77,15 +90,24 @@ if [[ ${pid} != "7f21" ]]; then
   exit 1
 fi
 
-if [[ ! -f ${TREE}/kernel/dtb/${DTB} ]]; then
-  echo "error: ${TREE}/kernel/dtb/${DTB} does not exist. available:" >&2
-  ls "${TREE}/kernel/dtb/" | grep -E "^tegra210-p3448-0000-p3449-0000-[a-z0-9]+\.dtb$" | sed 's/^/  /' >&2
-  exit 1
+[[ -f ${TREE}/${BOARD}.conf ]] || {
+  echo "error: no board config ${TREE}/${BOARD}.conf. available:" >&2
+  ls "${TREE}"/jetson-nano*.conf | xargs -n1 basename | sed 's/\.conf$//;s/^/  /' >&2
+  exit 1; }
+
+if [[ ${DTB} == auto ]]; then
+  unset DTBFILE
+else
+  if [[ ! -f ${TREE}/kernel/dtb/${DTB} ]]; then
+    echo "error: ${TREE}/kernel/dtb/${DTB} does not exist. available:" >&2
+    ls "${TREE}/kernel/dtb/" | grep -E "^tegra210-p3448-000[023]-p3449-0000-[a-z0-9]+\.dtb$" | sed 's/^/  /' >&2
+    exit 1
+  fi
+  export DTBFILE="${TREE}/kernel/dtb/${DTB}"
 fi
-export DTBFILE="${TREE}/kernel/dtb/${DTB}"
 
 echo "flashing ${BOARD} -> ${TARGET}"
-echo "  device tree: ${DTB}"
+echo "  device tree: ${DTB}$([ "${DTB}" = auto ] && echo "  (detection decides, from the module's own FAB)")"
 echo "this erases the microSD card entirely."
 cd "${TREE}"
 ./flash.sh "${BOARD}" "${TARGET}"

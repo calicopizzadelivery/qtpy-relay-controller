@@ -26,7 +26,31 @@ import time
 
 from PIL import Image, ImageStat
 
-DEVICE = "/dev/video0"
+def find_device() -> str:
+    """First V4L2 node that can actually capture.
+
+    The dongle's node number moves whenever USB renumbers -- which every power
+    cycle can do -- so hardcoding /dev/video0 produces "Cannot identify device"
+    at the worst moment. Each UVC device also exposes a second node for
+    metadata, which enumerates formats but yields no frames, so the capability
+    bits are checked rather than just taking the lowest number.
+    """
+    import glob as _glob
+    for node in sorted(_glob.glob("/sys/class/video4linux/video*"),
+                       key=lambda p: int(p.rsplit("video", 1)[1])):
+        dev = "/dev/" + os.path.basename(node)
+        try:
+            with open(os.path.join(node, "index")) as fh:
+                if fh.read().strip() != "0":
+                    continue          # metadata node of a multi-node device
+        except OSError:
+            continue
+        if os.path.exists(dev):
+            return dev
+    return "/dev/video0"
+
+
+DEVICE = None
 WIDTH, HEIGHT = 1920, 1080
 
 # The capture device permits only one streaming client. When hdmi-preview.sh
@@ -160,7 +184,8 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", choices=("grab", "watch", "status"))
     ap.add_argument("-o", "--output", default="hdmi.png")
-    ap.add_argument("-d", "--device", default=DEVICE)
+    ap.add_argument("-d", "--device", default=None,
+                    help="capture node (default: autodetect)")
     ap.add_argument("--width", type=int, default=WIDTH)
     ap.add_argument("--height", type=int, default=HEIGHT)
     ap.add_argument("--settle", type=float, default=4.0,
@@ -174,6 +199,8 @@ def main() -> int:
     ap.add_argument("--interval", type=float, default=3.0,
                     help="watch: seconds between frames")
     args = ap.parse_args()
+    if args.device is None:
+        args.device = find_device()
 
     if args.mode in ("grab", "status"):
         path, state, detail = grab_and_classify(args)

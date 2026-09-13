@@ -64,12 +64,18 @@ def spooled_frame(max_age: float = SPOOL_MAX_AGE):
     return None
 
 
-def capture(device: str, width: int, height: int, warmup: int,
+def capture(device: str, width: int, height: int, settle: float,
             direct: bool = False) -> bytes:
-    """Return the PNG bytes of one settled frame.
+    """Return the PNG bytes of one frame, taken after the dongle has locked.
 
-    The first frames off this dongle are unreliable, so several are pulled and
-    the last one kept.
+    This dongle emits its own colour-bar test pattern for about a second after
+    the stream opens, then locks onto the HDMI input and passes real video. A
+    short grab therefore returns the test pattern and looks exactly like "no
+    signal" -- which is wrong, and was wrong for a long time here.
+
+    So the stream is held open past the lock, throttled to 1 fps so only a
+    handful of files are written, and the LAST frame is kept. This is what the
+    GNOME camera app is doing implicitly by simply continuing to display.
     """
     if not direct:
         live = spooled_frame()
@@ -78,14 +84,22 @@ def capture(device: str, width: int, height: int, warmup: int,
 
     tmp = tempfile.mkdtemp(prefix="hdmi-")
     try:
+        # num-buffers counts source frames, so seconds * source fps. videorate
+        # then drops to 1 fps, keeping the file count small while the stream
+        # itself stays open long enough to lock.
+        src_fps = 30
+        nbuf = max(int(settle * src_fps), src_fps)
         pipeline = [
             "gst-launch-1.0", "-q",
-            "v4l2src", f"device={device}", f"num-buffers={warmup}",
-            "!", f"image/jpeg,width={width},height={height}",
-            "!", "jpegdec", "!", "videoconvert", "!", "pngenc",
+            "v4l2src", f"device={device}", f"num-buffers={nbuf}",
+            "!", f"image/jpeg,width={width},height={height},framerate={src_fps}/1",
+            "!", "jpegdec", "!", "videoconvert",
+            "!", "videorate", "!", "video/x-raw,framerate=1/1",
+            "!", "pngenc",
             "!", "multifilesink", f"location={tmp}/f%03d.png",
         ]
-        res = subprocess.run(pipeline, capture_output=True, text=True, timeout=60)
+        res = subprocess.run(pipeline, capture_output=True, text=True,
+                             timeout=max(60, settle * 4))
         frames = sorted(glob.glob(f"{tmp}/f*.png"))
         if not frames:
             if "busy" in res.stderr.lower():
@@ -117,7 +131,10 @@ def classify(im: Image.Image) -> tuple:
     row = h // 2
     sampled = [rgb.getpixel((int((i + 0.5) * w / 8), row)) for i in range(8)]
     if all(near(got, want) for got, want in zip(sampled, NO_SIGNAL_BARS)):
-        return "no-signal", "dongle colour bars: nothing driving the HDMI input"
+        return "no-signal", ("dongle colour bars after the settle period: "
+                             "nothing driving the HDMI input. If the source is "
+                             "definitely live, raise --settle -- the bars are "
+                             "also what it shows before locking.")
 
     if spread < 6:
         shade = "black" if mean[0] < 24 else f"uniform rgb{tuple(int(v) for v in mean)}"
@@ -129,7 +146,7 @@ def classify(im: Image.Image) -> tuple:
 
 
 def grab_and_classify(args) -> tuple:
-    png = capture(args.device, args.width, args.height, args.warmup, args.direct)
+    png = capture(args.device, args.width, args.height, args.settle, args.direct)
     path = args.output
     with open(path, "wb") as fh:
         fh.write(png)
@@ -146,8 +163,10 @@ def main() -> int:
     ap.add_argument("-d", "--device", default=DEVICE)
     ap.add_argument("--width", type=int, default=WIDTH)
     ap.add_argument("--height", type=int, default=HEIGHT)
-    ap.add_argument("--warmup", type=int, default=15,
-                    help="frames to pull before keeping one (default 15)")
+    ap.add_argument("--settle", type=float, default=4.0,
+                    help="seconds to hold the stream open before keeping a "
+                         "frame; the dongle shows its own colour bars for "
+                         "about a second before locking (default 4)")
     ap.add_argument("--direct", action="store_true",
                     help="always open the capture device, ignoring the "
                          "preview spool (needs the preview stopped)")

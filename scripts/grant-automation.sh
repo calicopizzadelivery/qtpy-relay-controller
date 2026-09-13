@@ -64,9 +64,24 @@ install_pinned "${REPO_ROOT}/scripts/l4t-flash.sh"   "${FLASH}"
 # writable by the user would re-open exactly the hole the root-owned scripts
 # close.
 if [[ -d ${L4T_DIR} ]]; then
-  chown -R root:root "${L4T_DIR}"
+  # Deliberately NOT recursive.
+  #
+  # chown clears setuid and setgid bits whenever it changes a file's owner --
+  # a kernel safeguard so a setuid binary cannot be handed to a new owner. A
+  # recursive chown over this tree therefore strips setuid from every binary in
+  # Linux_for_Tegra/rootfs: sudo, su, passwd, pkexec, dbus-daemon-launch-helper.
+  # Those get flashed to the target, where sudo then refuses to run and GDM's
+  # greeter never starts, so the board boots to a blank screen. That is a very
+  # expensive bug to chase from the target end.
+  #
+  # Only the directory itself and the scripts reached as root need protecting;
+  # the rootfs is payload, not executable surface for this host.
+  chown root:root "${L4T_DIR}"
   chmod 0755 "${L4T_DIR}"
-  echo "took ownership of ${L4T_DIR} (readable, not writable, by ${TARGET_USER})"
+  for f in "${L4T_DIR}"/*.tbz2 "${L4T_DIR}"/*.zip; do
+    [[ -e ${f} ]] && chown root:root "${f}"
+  done
+  echo "secured ${L4T_DIR} (directory and source archives; rootfs left alone)"
 fi
 
 # Validate before installing. A malformed sudoers file can lock you out of

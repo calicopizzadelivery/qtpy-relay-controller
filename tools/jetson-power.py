@@ -27,6 +27,8 @@ import relayctl  # noqa: E402
 
 
 def apply(sp, verb, channels, label):
+    if not channels:
+        return
     for ch in channels:
         reply = relayctl.send(sp, f"{verb} {ch}")
         ok = any(r.startswith("OK") for r in reply)
@@ -49,6 +51,13 @@ def main() -> int:
                     help="channel feeding a back-feed source; repeatable "
                          "(default: 8, the FRDM-K64F)")
     ap.add_argument("--off-seconds", type=float, default=8.0)
+    ap.add_argument("--hdmi-channel", type=int, default=5, metavar="CH",
+                    help="channel feeding the HDMI capture dongle; cycled and "
+                         "allowed to settle BEFORE the Jetson is powered "
+                         "(default 5, 0 to skip)")
+    ap.add_argument("--hdmi-settle", type=float, default=12.0,
+                    help="seconds to let the dongle come up before the Jetson "
+                         "boots (default 12)")
     ap.add_argument("--settle", type=float, default=15.0,
                     help="wait after power-on before restoring the cut "
                          "channels, so the Jetson is up before USB returns")
@@ -59,14 +68,30 @@ def main() -> int:
     sp = relayctl.open_port(port, 1.0)
 
     try:
+        hdmi = [args.hdmi_channel] if args.hdmi_channel else []
+
         if args.action in ("cycle", "off"):
             apply(sp, "OFF", cut, "(back-feed source)")
+            apply(sp, "OFF", hdmi, "(HDMI sink)")
             apply(sp, "OFF", [args.power_channel], "(Jetson module)")
 
         if args.action == "cycle":
             time.sleep(args.off_seconds)
 
         if args.action in ("cycle", "on"):
+            # The sink comes up first and is given time to settle. The Jetson
+            # samples hotplug and reads EDID once, early in the bootloader: a
+            # dongle still enumerating at that moment leaves the board booting
+            # with "hdmi cable not connected", and nothing recovers it short of
+            # another reboot. These dongles also wedge -- enumerated and
+            # apparently healthy while doing nothing -- which a power cycle
+            # clears, the same way it does for the console adapter.
+            if hdmi:
+                apply(sp, "ON", hdmi, "(HDMI sink)")
+                print(f"  waiting {args.hdmi_settle:g}s for the sink to settle "
+                      f"before powering the Jetson")
+                time.sleep(args.hdmi_settle)
+
             apply(sp, "ON", [args.power_channel], "(Jetson module)")
             if args.settle > 0:
                 time.sleep(args.settle)

@@ -49,9 +49,7 @@ install_pinned() {
       -e 's|^REL=.*|REL=R32.7.6|' \
       -e 's|^BOARD=.*|BOARD=jetson-nano-devkit|' \
       -e 's|^TARGET=.*|TARGET=mmcblk0p1|' \
-      -e 's|^BOARDID=.*|BOARDID=3448|' \
-      -e 's|^FAB=.*|FAB=300|' \
-      -e 's|^BOARDSKU=.*|BOARDSKU=0000|' \
+      -e 's|^DEFAULT_DTB=.*|DEFAULT_DTB=tegra210-p3448-0000-p3449-0000-b00.dtb|' \
       "${src}" > "${dst}.tmp"
   bash -n "${dst}.tmp" || { echo "error: ${dst} failed syntax check" >&2; exit 1; }
   install -o root -g root -m 0755 "${dst}.tmp" "${dst}"
@@ -78,7 +76,7 @@ cat > "${tmp}" <<RULE
 # Jetson bench automation. Two exact commands, no arguments permitted.
 # Installed by qtpy-relay-controller/scripts/grant-automation.sh
 # Remove with: sudo ./scripts/grant-automation.sh --revoke
-${TARGET_USER} ALL=(root) NOPASSWD: ${PREPARE} "", ${FLASH} ""
+${TARGET_USER} ALL=(root) NOPASSWD: ${PREPARE} "", ${FLASH}
 RULE
 
 if ! visudo -cqf "${tmp}"; then

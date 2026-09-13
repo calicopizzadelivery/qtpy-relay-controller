@@ -18,25 +18,39 @@ TREE="${L4T_DIR}/Linux_for_Tegra"
 BOARD=${L4T_BOARD:-jetson-nano-devkit}
 TARGET=${L4T_TARGET:-mmcblk0p1}
 
-# Carrier revision override.
+# Carrier device tree.
 #
-# flash.sh derives the carrier device tree from FAB:
-#   process_board_version() in p3448-0000.conf.common
-#   FAB < "300" -> tegra210-p3448-0000-p3449-0000-a02.dtb
+# flash.sh normally derives this from FAB, read off the module EEPROM:
+#   FAB <  "300" -> tegra210-p3448-0000-p3449-0000-a02.dtb
 #   FAB >= "300" -> ...-b00.dtb
 #
-# It normally reads FAB from the module EEPROM, but this unit's EEPROM read
-# fails ("eeprom_init: EEPROM read failed" in every boot log, before and after
-# reflashing), so detection falls through to the a02 default. This carrier is a
-# B01, whose display wiring differs -- which is why a perfectly healthy board
-# booted all the way to the setup wizard with the screen dark.
+# This unit's EEPROM read fails, so detection falls through to a02 -- wrong for
+# this B01 carrier. Overriding FAB does force b00, but it also makes flash.sh
+# skip its board-detection path, and that route dies in nvtboot with
+# "Error in NvTbootGetTOSBinaryLength: 0x11". DTBFILE overrides the device tree
+# directly instead (flash.sh line ~1816, mkfilepath prefers it over the value
+# process_board_version computed), leaving detection alone.
 #
-# Setting these explicitly skips the EEPROM path entirely: flash.sh only calls
-# get_board_version() when FAB is empty.
-BOARDID=${L4T_BOARDID:-3448}
-FAB=${L4T_FAB:-300}
-BOARDSKU=${L4T_BOARDSKU:-0000}
-export BOARDID FAB BOARDSKU
+# Selectable so a02 and b00 can be compared without reinstalling this script.
+DEFAULT_DTB=tegra210-p3448-0000-p3449-0000-b00.dtb
+DTB=""
+
+# Only --dtb <name> is accepted, and the name is validated against the device
+# trees actually present in the root-owned tree. This script is reachable
+# passwordless, so an unchecked argument would be a way to point a root-run
+# flash at an arbitrary file.
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dtb) DTB="${2:-}"; shift 2 ;;
+    *) echo "usage: $0 [--dtb <name>.dtb]" >&2; exit 2 ;;
+  esac
+done
+
+DTB="${DTB:-${DEFAULT_DTB}}"
+if [[ ! ${DTB} =~ ^[A-Za-z0-9._-]+\.dtb$ ]]; then
+  echo "error: --dtb must be a plain .dtb filename, got: ${DTB}" >&2
+  exit 2
+fi
 
 [[ ${EUID} -eq 0 ]] || { echo "error: run me with sudo" >&2; exit 1; }
 [[ -x ${TREE}/flash.sh ]] || {
@@ -63,9 +77,15 @@ if [[ ${pid} != "7f21" ]]; then
   exit 1
 fi
 
+if [[ ! -f ${TREE}/kernel/dtb/${DTB} ]]; then
+  echo "error: ${TREE}/kernel/dtb/${DTB} does not exist. available:" >&2
+  ls "${TREE}/kernel/dtb/" | grep -E "^tegra210-p3448-0000-p3449-0000-[a-z0-9]+\.dtb$" | sed 's/^/  /' >&2
+  exit 1
+fi
+export DTBFILE="${TREE}/kernel/dtb/${DTB}"
+
 echo "flashing ${BOARD} -> ${TARGET}"
-echo "  BOARDID=${BOARDID} FAB=${FAB} BOARDSKU=${BOARDSKU}"
-echo "  FAB ${FAB} selects the $([ "${FAB}" \< "300" ] && echo a02 || echo b00) carrier device tree"
+echo "  device tree: ${DTB}"
 echo "this erases the microSD card entirely."
 cd "${TREE}"
 ./flash.sh "${BOARD}" "${TARGET}"
